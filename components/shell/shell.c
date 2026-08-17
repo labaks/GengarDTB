@@ -271,10 +271,22 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
         .hres          = BSP_LCD_H_RES,
         .vres          = BSP_LCD_V_RES,
         .monochrome    = false,
-        /* NO rotation here on purpose. bsp_display_init() already put the panel
-         * into 320x240 landscape via swap_xy/mirror, so LVGL must treat the
-         * display as plain 320x240. Rotating in both layers is what produced the
-         * striped garbage on the first flash. */
+        /* These MUST match what bsp_display_init(landscape=true) applies.
+         *
+         * lvgl_port_add_disp calls esp_lcd_panel_swap_xy/mirror itself with the
+         * values below, overwriting whatever the BSP set. Leaving them at the
+         * default false put the panel back into 240x320 portrait while LVGL
+         * still believed it was 320x240 — the UI came out rotated 90 degrees
+         * with stale pixels in the uncovered region.
+         *
+         * Setting the same rotation in both layers is safe: these are absolute
+         * setters, not relative rotations, so applying swap_xy=true twice still
+         * means swap_xy=true. */
+        .rotation = {
+            .swap_xy  = true,
+            .mirror_x = true,
+            .mirror_y = false,
+        },
         .flags = {
             .buff_dma = true,
             /* LVGL lays RGB565 out as native little-endian uint16, the panel
@@ -293,6 +305,12 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
     if (!lvgl_port_lock(0)) {
         return ESP_FAIL;
     }
+
+    /* Paint the whole screen once before anything else. The panel keeps its GRAM
+     * across a reset, so without this the areas LVGL has not invalidated still
+     * show the previous firmware's pixels. */
+    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x101418), LV_PART_MAIN);
+    lv_obj_invalidate(lv_screen_active());
 
     s_group = lv_group_create();
     lv_group_set_default(s_group);
