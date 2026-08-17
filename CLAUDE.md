@@ -2,6 +2,27 @@
 
 > Файл памяти проекта. Читать в начале каждой сессии. Обновлять при изменении решений.
 
+## Быстрый старт сессии
+
+```powershell
+# окружение (нужно в каждой новой оболочке)
+powershell -ExecutionPolicy Bypass -NoProfile -NoExit -File C:\esp\esp-idf\export.ps1
+
+# сборка
+idf.py build
+
+# прошивка + лог загрузки, порт определяется сам
+powershell -ExecutionPolicy Bypass -File tools\flash.ps1
+powershell -ExecutionPolicy Bypass -File tools\flash.ps1 -Log 30
+```
+
+`idf.py monitor` **не использовать в скриптах** — он не завершается. Для этого есть
+`tools/monitor.py`, снимающий лог за фиксированное окно и корректно отпускающий
+линии DTR/RTS.
+
+Дальше по порядку: план работ в [ROADMAP.md](ROADMAP.md), формат приложений в
+[docs/app-format.md](docs/app-format.md).
+
 ## Что строим
 
 Настольное устройство-помощник: ESP32 + дисплей + кнопки, постоянно под питанием на столе.
