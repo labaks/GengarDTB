@@ -1,0 +1,5 @@
+{"obj":"rect","x":0,"y":0,"w":320,"h":44,"color":"0x1E2A38"}
+{"obj":"label","x":12,"y":12,"font":20,"color":"0xFFFFFF","text":"deskos layer A"}
+{"obj":"label","x":12,"y":62,"w":296,"font":14,"color":"0xC0C8D0","text":"This whole screen is one ui.jsonl file on the filesystem."}
+{"obj":"label","x":12,"y":104,"w":296,"font":14,"color":"0xC0C8D0","text":"No application code runs on the device. Views plus data bindings only."}
+{"obj":"label","x":12,"y":160,"font":14,"color":"0x8899A6","text":"B1+B3 returns to the launcher"}

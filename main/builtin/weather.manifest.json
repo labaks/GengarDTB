@@ -1,0 +1,10 @@
+{
+  "api": 1,
+  "id": "weather",
+  "name": "Weather",
+  "version": "0.1.0",
+  "layer": "declarative",
+  "entry": "ui.jsonl",
+  "capabilities": ["net.http", "time"],
+  "poll_sec": 900
+}

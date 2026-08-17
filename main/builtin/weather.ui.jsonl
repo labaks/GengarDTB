@@ -1,0 +1,7 @@
+{"src":"http","url":"https://api.open-meteo.com/v1/forecast?latitude=55.75&longitude=37.62&current=temperature_2m,apparent_temperature,weather_code&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=1","every":900}
+{"obj":"rect","x":0,"y":0,"w":320,"h":44,"color":"0x1E2A38"}
+{"obj":"label","x":12,"y":12,"font":20,"color":"0xFFFFFF","text":"Weather"}
+{"obj":"label","x":12,"y":60,"font":28,"color":"0xFFFFFF","text":"{{current.temperature_2m}} C"}
+{"obj":"label","x":12,"y":104,"font":14,"color":"0xC0C8D0","text":"feels like {{current.apparent_temperature}} C"}
+{"obj":"label","x":12,"y":134,"font":20,"color":"0xC0C8D0","text":"{{daily.temperature_2m_min.0}} ... {{daily.temperature_2m_max.0}}"}
+{"obj":"label","x":12,"y":176,"font":14,"color":"0x8899A6","text":"open-meteo, code {{current.weather_code}}"}

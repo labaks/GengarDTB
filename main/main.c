@@ -2,17 +2,93 @@
  * deskos — desk assistant shell for the ESP32-2432S028R (CYD).
  * Board facts, architecture decisions and known constraints: see ../CLAUDE.md
  */
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+
 #include "bsp.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "input.h"
+#include "net.h"
 #include "nvs_flash.h"
 #include "shell.h"
 #include "app_registry.h"
 
 static const char *TAG = "main";
+
+/* ---------------------------------------------------------- built-in apps */
+
+/* Built-in widgets are embedded in the image and unpacked to LittleFS on boot.
+ * They could have been drawn by compiled-in C, but then there would be two
+ * different ways to run a widget and only one of them would get exercised.
+ * Unpacking keeps a single loader — the filesystem one — and means the device
+ * is useful before any microSD card exists. */
+#define EMBEDDED(name) \
+    extern const char name##_start[] asm("_binary_" #name "_start"); \
+    extern const char name##_end[]   asm("_binary_" #name "_end")
+
+/* EMBED_TXTFILES appends a NUL byte that the _end symbol counts, so the payload
+ * is one shorter than the symbols suggest. The subtraction happens on the
+ * difference, never on the pointer: `_end - 1` reads to the compiler as index
+ * -1 of an extern array and trips -Werror=array-bounds. */
+#define EMB_LEN(name) ((size_t)(name##_end - name##_start) - 1)
+
+EMBEDDED(hello_manifest_json);
+EMBEDDED(hello_ui_jsonl);
+EMBEDDED(weather_manifest_json);
+EMBEDDED(weather_ui_jsonl);
+
+static void write_if_changed(const char *path, const char *data, size_t len)
+{
+    struct stat st;
+    if (stat(path, &st) == 0 && (size_t)st.st_size == len) {
+        return;   /* already current; do not burn a flash erase cycle per boot */
+    }
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        ESP_LOGE(TAG, "cannot write %s: %s", path, strerror(errno));
+        return;
+    }
+    fwrite(data, 1, len, f);
+    fclose(f);
+    ESP_LOGI(TAG, "unpacked %s (%u bytes)", path, (unsigned)len);
+}
+
+static void provision_builtin(const char *id,
+                              const char *manifest, size_t manifest_len,
+                              const char *ui, size_t ui_len)
+{
+    char dir[80];
+    snprintf(dir, sizeof(dir), "%s/apps/%s", BSP_FS_MOUNT_POINT, id);
+    mkdir(dir, 0777);
+
+    char path[128];
+    snprintf(path, sizeof(path), "%s/manifest.json", dir);
+    write_if_changed(path, manifest, manifest_len);
+
+    snprintf(path, sizeof(path), "%s/ui.jsonl", dir);
+    write_if_changed(path, ui, ui_len);
+}
+
+static void provision_builtin_apps(void)
+{
+    char apps[64];
+    snprintf(apps, sizeof(apps), "%s/apps", BSP_FS_MOUNT_POINT);
+    mkdir(apps, 0777);
+
+    provision_builtin("hello",
+                      hello_manifest_json_start, EMB_LEN(hello_manifest_json),
+                      hello_ui_jsonl_start,      EMB_LEN(hello_ui_jsonl));
+
+    provision_builtin("weather",
+                      weather_manifest_json_start, EMB_LEN(weather_manifest_json),
+                      weather_ui_jsonl_start,      EMB_LEN(weather_ui_jsonl));
+}
 
 /* The buttons are not soldered yet. Until they are, boot with the touch-zone
  * backend (usable but single-touch) and run the chord self-test below through
@@ -361,6 +437,10 @@ void app_main(void)
 
     ESP_ERROR_CHECK(bsp_fs_mount());
 
+    /* EMBED_TXTFILES appends a NUL that is counted in the _end symbol; the -1
+     * above keeps it out of the files we write. */
+    provision_builtin_apps();
+
     /* No card is a normal state, not a failure: the shell boots and says so. */
     if (bsp_sd_mount() != ESP_OK) {
         ESP_LOGW(TAG, "continuing without microSD — no widget apps will be listed");
@@ -374,7 +454,12 @@ void app_main(void)
 
     ESP_ERROR_CHECK(input_init(INPUT_BACKEND_TOUCH_ZONES));
 
-    app_registry_scan();   /* returns NOT_FOUND without a card; not fatal */
+    app_registry_scan();
+
+    /* Brought up before the shell so the launcher's status line is right from
+     * the first frame. Returns OK with no credentials — that is a state to
+     * display, not a boot failure. */
+    ESP_ERROR_CHECK(net_init());
 
     ESP_ERROR_CHECK(shell_start(io, panel));
 

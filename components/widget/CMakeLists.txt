@@ -1,0 +1,15 @@
+idf_component_register(
+    SRCS
+        "widget.c"
+        "datasource.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        registry
+        net
+        json
+        esp_http_client
+        esp-tls
+        lvgl__lvgl
+        espressif__esp_lvgl_port
+)

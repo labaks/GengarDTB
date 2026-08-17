@@ -5,6 +5,13 @@ idf_component_register(
         bsp
         input
         shell
+        registry
+        net
         nvs_flash
         esp_lcd
+    EMBED_TXTFILES
+        "builtin/hello.manifest.json"
+        "builtin/hello.ui.jsonl"
+        "builtin/weather.manifest.json"
+        "builtin/weather.ui.jsonl"
 )

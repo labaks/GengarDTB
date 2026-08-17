@@ -1,0 +1,9 @@
+{
+  "api": 1,
+  "id": "hello",
+  "name": "Layer A demo",
+  "version": "0.1.0",
+  "layer": "declarative",
+  "entry": "ui.jsonl",
+  "capabilities": []
+}

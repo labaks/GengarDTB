@@ -46,10 +46,10 @@ static void copy_str(char *dst, size_t dst_sz, const cJSON *node, const char *fa
     snprintf(dst, dst_sz, "%s", s);
 }
 
-static bool load_manifest(const char *dir_name, app_info_t *out)
+static bool load_manifest(const char *root_dir, const char *dir_name, app_info_t *out)
 {
-    char path[128];
-    snprintf(path, sizeof(path), "%s/apps/%s/manifest.json", BSP_SD_MOUNT_POINT, dir_name);
+    char path[160];
+    snprintf(path, sizeof(path), "%s/%s/manifest.json", root_dir, dir_name);
 
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -89,7 +89,7 @@ static bool load_manifest(const char *dir_name, app_info_t *out)
     copy_str(out->name,    sizeof(out->name),    cJSON_GetObjectItem(root, "name"),    dir_name);
     copy_str(out->version, sizeof(out->version), cJSON_GetObjectItem(root, "version"), "0.0.0");
     copy_str(out->entry,   sizeof(out->entry),   cJSON_GetObjectItem(root, "entry"),   "ui.jsonl");
-    snprintf(out->dir, sizeof(out->dir), "%s/apps/%s", BSP_SD_MOUNT_POINT, dir_name);
+    snprintf(out->dir, sizeof(out->dir), "%s/%s", root_dir, dir_name);
 
     const char *layer = cJSON_GetStringValue(cJSON_GetObjectItem(root, "layer"));
     out->layer = (layer && strcmp(layer, "lua") == 0) ? APP_LAYER_LUA : APP_LAYER_DECLARATIVE;
@@ -102,22 +102,12 @@ done:
     return ok;
 }
 
-esp_err_t app_registry_scan(void)
+static void scan_root(const char *root_dir)
 {
-    s_count = 0;
-
-    if (!bsp_sd_is_mounted()) {
-        ESP_LOGW(TAG, "no microSD — zero apps, shell continues");
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    char apps_dir[64];
-    snprintf(apps_dir, sizeof(apps_dir), "%s/apps", BSP_SD_MOUNT_POINT);
-
-    DIR *d = opendir(apps_dir);
+    DIR *d = opendir(root_dir);
     if (!d) {
-        ESP_LOGW(TAG, "%s missing — create it and drop app folders in", apps_dir);
-        return ESP_ERR_NOT_FOUND;
+        ESP_LOGD(TAG, "%s absent", root_dir);
+        return;
     }
 
     const struct dirent *ent = NULL;
@@ -125,17 +115,34 @@ esp_err_t app_registry_scan(void)
         if (ent->d_name[0] == '.') {
             continue;
         }
-        if (load_manifest(ent->d_name, &s_apps[s_count])) {
-            ESP_LOGI(TAG, "app '%s' v%s (%s)", s_apps[s_count].id,
+        if (load_manifest(root_dir, ent->d_name, &s_apps[s_count])) {
+            ESP_LOGI(TAG, "app '%s' v%s (%s) from %s", s_apps[s_count].id,
                      s_apps[s_count].version,
-                     s_apps[s_count].layer == APP_LAYER_LUA ? "lua" : "declarative");
+                     s_apps[s_count].layer == APP_LAYER_LUA ? "lua" : "declarative",
+                     root_dir);
             s_count++;
         }
     }
     closedir(d);
+}
+
+esp_err_t app_registry_scan(void)
+{
+    s_count = 0;
+
+    /* Built-ins live in internal flash so the device is useful with no card at
+     * all; the card is scanned second and simply adds to the list. Both go
+     * through the same filesystem path, so there is only one loader to trust. */
+    scan_root(BSP_FS_MOUNT_POINT "/apps");
+
+    if (bsp_sd_is_mounted()) {
+        scan_root(BSP_SD_MOUNT_POINT "/apps");
+    } else {
+        ESP_LOGW(TAG, "no microSD — built-in apps only");
+    }
 
     ESP_LOGI(TAG, "%u app(s) registered", (unsigned)s_count);
-    return ESP_OK;
+    return (s_count > 0) ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
 size_t app_registry_count(void)

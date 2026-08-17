@@ -1,0 +1,32 @@
+menu "deskos network"
+
+    config DESKOS_WIFI_SSID
+        string "WiFi SSID (build-time default)"
+        default ""
+        help
+            Used only when NVS holds no credentials. Left empty by default.
+
+            These land in sdkconfig, which is NOT tracked by git, so a password
+            set here does not end up in the repository. It is still a build
+            artifact on disk — prefer net_set_credentials() once a provisioning
+            UI exists.
+
+    config DESKOS_WIFI_PASSWORD
+        string "WiFi password (build-time default)"
+        default ""
+        help
+            See CONFIG_DESKOS_WIFI_SSID. Empty means an open network.
+
+    config DESKOS_TZ
+        string "POSIX timezone string"
+        default "UTC0"
+        help
+            POSIX TZ format, which counts offsets the opposite way round from
+            what people expect: Moscow (UTC+3) is "MSK-3", Berlin is
+            "CET-1CEST,M3.5.0,M10.5.0/3".
+
+    config DESKOS_SNTP_SERVER
+        string "SNTP server"
+        default "pool.ntp.org"
+
+endmenu

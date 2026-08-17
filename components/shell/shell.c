@@ -20,10 +20,15 @@
 #include "esp_lvgl_port.h"
 #include "input.h"
 #include "lvgl.h"
+#include "net.h"
+#include "widget.h"
 
 static const char *TAG = "shell";
 
-#define LCD_BUFFER_LINES  40      /* the main heap knob: 320*40*2 = 25 KB per buffer */
+/* The main heap knob: 320 lines * 2 bytes each. Two buffers, so 24 lines costs
+ * 30 KB. Deliberately smaller than it could be — WiFi takes roughly 50 KB and a
+ * TLS handshake peaks around 40 KB more, and this board has no PSRAM. */
+#define LCD_BUFFER_LINES  24
 /* This panel leaks a fair amount of backlight through black pixels — at full
  * brightness a dark UI reads as washed-out blue-grey rather than black. 55%
  * keeps it legible indoors while letting the dark theme actually look dark. */
@@ -101,13 +106,29 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 static void status_refresh(void)
 {
     static const char *backends[] = { "gpio", "touch", "inject" };
+    static const char *nets[]     = { "--", "..", "ok" };
 
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%s  |  SD %s  |  PC %s",
+    if (!s_status) {
+        return;
+    }
+
+    char buf[80];
+    snprintf(buf, sizeof(buf), "%s | wifi %s | sd %s | pc %s",
              backends[input_get_backend()],
+             nets[net_state()],
              bsp_sd_is_mounted() ? "ok" : "--",
              s_host_connected ? "ok" : "--");
     lv_label_set_text(s_status, buf);
+}
+
+/* Called from the WiFi event task, so it has to take the LVGL lock itself. */
+static void on_net_state(net_state_t state)
+{
+    (void)state;
+    if (lvgl_port_lock(200)) {
+        status_refresh();
+        lvgl_port_unlock();
+    }
 }
 
 void shell_set_host_connected(bool connected)
@@ -130,7 +151,10 @@ static bool handle_system_chord(const input_event_t *ev)
 {
     /* B1+B3 short: home / launcher. */
     if (ev->mask == (INPUT_B1 | INPUT_B3) && ev->kind == INPUT_EV_CLICK) {
-        ESP_LOGI(TAG, "system: home");
+        if (widget_is_open()) {
+            ESP_LOGI(TAG, "system: home (closing '%s')", widget_current()->id);
+            widget_close();
+        }
         return true;
     }
 
@@ -148,6 +172,7 @@ static bool handle_system_chord(const input_event_t *ev)
      * misbehaving widget can lock the user out of their own device. */
     if (ev->mask == INPUT_MASK_ALL && ev->kind == INPUT_EV_LONG_PRESS) {
         ESP_LOGW(TAG, "system: force return to launcher");
+        widget_close();
         return true;
     }
 
@@ -201,8 +226,19 @@ static void shell_tick(lv_timer_t *timer)
 static void app_clicked(lv_event_t *e)
 {
     const app_info_t *app = lv_event_get_user_data(e);
-    /* Layer A interpreter lands next; for now prove the whole input path works. */
-    ESP_LOGI(TAG, "launch requested: %s (%s)", app->id, app->dir);
+
+    if (!app_registry_is_available(app, s_host_connected)) {
+        /* Degraded rather than hidden: the entry stays in the list so the user
+         * can see the widget exists, but opening it would show nothing useful. */
+        ESP_LOGW(TAG, "'%s' is unavailable right now", app->id);
+        return;
+    }
+
+    ESP_LOGI(TAG, "launching '%s' from %s", app->id, app->dir);
+    const esp_err_t err = widget_open(app);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "cannot open '%s': %s", app->id, esp_err_to_name(err));
+    }
 }
 
 static void build_launcher(void)
@@ -330,6 +366,7 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
     status_refresh();
 
     lv_timer_create(shell_tick, 10, NULL);
+    net_on_state_change(on_net_state);
 
     lvgl_port_unlock();
 
