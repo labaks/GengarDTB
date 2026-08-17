@@ -146,34 +146,73 @@ void shell_set_host_connected(bool connected)
 
 /* ------------------------------------------------------------ system chords */
 
+/* The two layouts differ by more than one binding, so the mapping is chosen from
+ * how many buttons are actually wired rather than hardcoded. With only B1 and B2
+ * there is no dedicated select key, so B1+B2 becomes ENTER — which in turn
+ * displaces brightness and the escape hatch onto long presses. */
+static bool three_buttons(void)
+{
+    return (input_get_present_mask() & INPUT_B3) != 0;
+}
+
+static void step_backlight(void)
+{
+    uint8_t pct = bsp_backlight_get();
+    pct = (pct >= 100) ? 20 : (uint8_t)(pct + 20);
+    bsp_backlight_set(pct);
+    ESP_LOGI(TAG, "system: backlight %u%%", pct);
+}
+
+static void go_home(const char *why)
+{
+    if (widget_is_open()) {
+        ESP_LOGI(TAG, "system: home (%s), closing '%s'", why, widget_current()->id);
+        widget_close();
+    }
+}
+
 /* Returns true when the event was a system action and must not reach the app. */
 static bool handle_system_chord(const input_event_t *ev)
 {
-    /* B1+B3 short: home / launcher. */
-    if (ev->mask == (INPUT_B1 | INPUT_B3) && ev->kind == INPUT_EV_CLICK) {
-        if (widget_is_open()) {
-            ESP_LOGI(TAG, "system: home (closing '%s')", widget_current()->id);
-            widget_close();
+    const bool longp  = ev->kind == INPUT_EV_LONG_PRESS;
+    const bool click  = ev->kind == INPUT_EV_CLICK;
+    const bool repeat = ev->kind == INPUT_EV_HOLD_REPEAT;
+
+    /* B1 long is home under BOTH layouts, and is the only route back that a
+     * resistive panel can produce — it is single-touch, so no chord is
+     * reachable by finger. Without it a touch-only user who opens a widget is
+     * stuck until a reset. */
+    if (ev->mask == INPUT_B1 && longp) {
+        go_home("long press");
+        return true;
+    }
+
+    if (three_buttons()) {
+        if (ev->mask == (INPUT_B1 | INPUT_B3) && click) {
+            go_home("chord");
+            return true;
         }
-        return true;
-    }
-
-    /* B1+B2 (click or autorepeat): brightness. Wraps so one chord is enough. */
-    if (ev->mask == (INPUT_B1 | INPUT_B2) &&
-        (ev->kind == INPUT_EV_CLICK || ev->kind == INPUT_EV_HOLD_REPEAT)) {
-        uint8_t pct = bsp_backlight_get();
-        pct = (pct >= 100) ? 20 : (uint8_t)(pct + 20);
-        bsp_backlight_set(pct);
-        ESP_LOGI(TAG, "system: backlight %u%%", pct);
-        return true;
-    }
-
-    /* All three, long: escape hatch. This one is non-negotiable — without it a
-     * misbehaving widget can lock the user out of their own device. */
-    if (ev->mask == INPUT_MASK_ALL && ev->kind == INPUT_EV_LONG_PRESS) {
-        ESP_LOGW(TAG, "system: force return to launcher");
-        widget_close();
-        return true;
+        if (ev->mask == (INPUT_B1 | INPUT_B2) && (click || repeat)) {
+            step_backlight();
+            return true;
+        }
+        /* Escape hatch. Non-negotiable: without it a misbehaving widget can
+         * lock the user out of their own device. */
+        if (ev->mask == INPUT_MASK_ALL && longp) {
+            ESP_LOGW(TAG, "system: force return to launcher");
+            widget_close();
+            return true;
+        }
+    } else {
+        if (ev->mask == INPUT_B2 && longp) {
+            step_backlight();
+            return true;
+        }
+        if (ev->mask == (INPUT_B1 | INPUT_B2) && longp) {
+            ESP_LOGW(TAG, "system: force return to launcher");
+            widget_close();
+            return true;
+        }
     }
 
     return false;
@@ -181,20 +220,27 @@ static bool handle_system_chord(const input_event_t *ev)
 
 static uint32_t translate_key(const input_event_t *ev)
 {
-    if (ev->mask == INPUT_B1 &&
-        (ev->kind == INPUT_EV_CLICK || ev->kind == INPUT_EV_HOLD_REPEAT)) {
+    const bool click  = ev->kind == INPUT_EV_CLICK;
+    const bool repeat = ev->kind == INPUT_EV_HOLD_REPEAT;
+
+    if (ev->mask == INPUT_B1 && (click || repeat)) {
         return LV_KEY_PREV;
     }
-    if (ev->mask == INPUT_B2 &&
-        (ev->kind == INPUT_EV_CLICK || ev->kind == INPUT_EV_HOLD_REPEAT)) {
+    if (ev->mask == INPUT_B2 && (click || repeat)) {
         return LV_KEY_NEXT;
     }
-    if (ev->mask == INPUT_B3 && ev->kind == INPUT_EV_CLICK) {
+
+    if (three_buttons()) {
+        if (ev->mask == INPUT_B3 && click) {
+            return LV_KEY_ENTER;
+        }
+        if (ev->mask == INPUT_B3 && ev->kind == INPUT_EV_LONG_PRESS) {
+            return LV_KEY_ESC;
+        }
+    } else if (ev->mask == (INPUT_B1 | INPUT_B2) && click) {
         return LV_KEY_ENTER;
     }
-    if (ev->mask == INPUT_B3 && ev->kind == INPUT_EV_LONG_PRESS) {
-        return LV_KEY_ESC;
-    }
+
     return 0;
 }
 

@@ -60,6 +60,14 @@ typedef enum {
 #define INPUT_REPEAT_MS    250
 #define INPUT_DOUBLE_MS    300
 
+/* Which buttons physically exist. Call BEFORE input_init.
+ *
+ * This is not cosmetic: GPIO35 has no internal pull-up, so if it is declared
+ * present but not wired with its external 10k it floats and the device presses
+ * B3 for itself. Pins outside the mask are never configured or read. */
+void input_set_present_mask(uint8_t mask);
+uint8_t input_get_present_mask(void);
+
 esp_err_t input_init(input_backend_t backend);
 
 /* Switch backends at runtime — useful for flipping to touch zones when the

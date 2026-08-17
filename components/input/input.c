@@ -19,15 +19,28 @@ static volatile uint8_t s_injected;     /* written by input_inject(), read by th
 
 /* ------------------------------------------------------------------ backends */
 
+static uint8_t s_present = INPUT_MASK_ALL;
+
+void input_set_present_mask(uint8_t mask)
+{
+    s_present = mask & INPUT_MASK_ALL;
+}
+
+uint8_t input_get_present_mask(void)
+{
+    return s_present;
+}
+
 static uint8_t read_gpio(void)
 {
     uint8_t m = 0;
     /* Active low: pressed pulls the pin to GND. B1/B2 use internal pull-ups,
      * B3 (GPIO35) is input-only with no internal pull-up and depends on the
-     * external 10k to 3V3 — without that resistor it floats and reads garbage. */
-    if (gpio_get_level(BSP_PIN_BTN1) == 0) { m |= INPUT_B1; }
-    if (gpio_get_level(BSP_PIN_BTN2) == 0) { m |= INPUT_B2; }
-    if (gpio_get_level(BSP_PIN_BTN3) == 0) { m |= INPUT_B3; }
+     * external 10k to 3V3 — without that resistor it floats and reads garbage,
+     * which is why unwired buttons are skipped entirely rather than read. */
+    if ((s_present & INPUT_B1) && gpio_get_level(BSP_PIN_BTN1) == 0) { m |= INPUT_B1; }
+    if ((s_present & INPUT_B2) && gpio_get_level(BSP_PIN_BTN2) == 0) { m |= INPUT_B2; }
+    if ((s_present & INPUT_B3) && gpio_get_level(BSP_PIN_BTN3) == 0) { m |= INPUT_B3; }
     return m;
 }
 
@@ -176,22 +189,37 @@ static void input_task(void *arg)
 
 static esp_err_t gpio_backend_init(void)
 {
-    const gpio_config_t pulled = {
-        .pin_bit_mask = (1ULL << BSP_PIN_BTN1) | (1ULL << BSP_PIN_BTN2),
-        .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_ENABLE,
-    };
-    esp_err_t err = gpio_config(&pulled);
-    if (err != ESP_OK) {
-        return err;
+    uint64_t pulled_pins = 0;
+    if (s_present & INPUT_B1) { pulled_pins |= 1ULL << BSP_PIN_BTN1; }
+    if (s_present & INPUT_B2) { pulled_pins |= 1ULL << BSP_PIN_BTN2; }
+
+    if (pulled_pins) {
+        const gpio_config_t pulled = {
+            .pin_bit_mask = pulled_pins,
+            .mode         = GPIO_MODE_INPUT,
+            .pull_up_en   = GPIO_PULLUP_ENABLE,
+        };
+        const esp_err_t err = gpio_config(&pulled);
+        if (err != ESP_OK) {
+            return err;
+        }
     }
 
-    /* GPIO35 accepts no internal pull-up; the external resistor is mandatory. */
-    const gpio_config_t bare = {
-        .pin_bit_mask = (1ULL << BSP_PIN_BTN3),
-        .mode         = GPIO_MODE_INPUT,
-    };
-    return gpio_config(&bare);
+    /* GPIO35 accepts no internal pull-up; the external resistor is mandatory,
+     * so it is only configured when declared present. */
+    if (s_present & INPUT_B3) {
+        const gpio_config_t bare = {
+            .pin_bit_mask = (1ULL << BSP_PIN_BTN3),
+            .mode         = GPIO_MODE_INPUT,
+        };
+        return gpio_config(&bare);
+    }
+
+    ESP_LOGI(TAG, "buttons wired: %s%s%s",
+             (s_present & INPUT_B1) ? "B1 " : "",
+             (s_present & INPUT_B2) ? "B2 " : "",
+             (s_present & INPUT_B3) ? "B3" : "");
+    return ESP_OK;
 }
 
 esp_err_t input_set_backend(input_backend_t backend)

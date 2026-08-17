@@ -42,11 +42,42 @@ EMBEDDED(hello_ui_jsonl);
 EMBEDDED(weather_manifest_json);
 EMBEDDED(weather_ui_jsonl);
 
-static void write_if_changed(const char *path, const char *data, size_t len)
+/* Compares CONTENT, not just size. Size alone is a trap: changing the weather
+ * widget's coordinates from Moscow to Plovdiv altered no byte count at all, so
+ * a size check silently kept serving the old file. */
+static bool already_current(const char *path, const char *data, size_t len)
 {
     struct stat st;
-    if (stat(path, &st) == 0 && (size_t)st.st_size == len) {
-        return;   /* already current; do not burn a flash erase cycle per boot */
+    if (stat(path, &st) != 0 || (size_t)st.st_size != len) {
+        return false;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return false;
+    }
+
+    char buf[256];
+    size_t off = 0;
+    bool same = true;
+
+    while (off < len) {
+        const size_t want = (len - off > sizeof(buf)) ? sizeof(buf) : (len - off);
+        if (fread(buf, 1, want, f) != want || memcmp(buf, data + off, want) != 0) {
+            same = false;
+            break;
+        }
+        off += want;
+    }
+
+    fclose(f);
+    return same;
+}
+
+static void write_if_changed(const char *path, const char *data, size_t len)
+{
+    if (already_current(path, data, len)) {
+        return;   /* do not burn a flash erase cycle on every boot */
     }
 
     FILE *f = fopen(path, "wb");
@@ -93,7 +124,7 @@ static void provision_builtin_apps(void)
 /* The buttons are not soldered yet. Until they are, boot with the touch-zone
  * backend (usable but single-touch) and run the chord self-test below through
  * the injection backend, since a resistive panel can never produce a chord. */
-#define DESKOS_CHORD_SELFTEST 1
+#define DESKOS_CHORD_SELFTEST 0
 
 #if DESKOS_CHORD_SELFTEST
 static void chord_selftest(void *arg)
@@ -452,7 +483,12 @@ void app_main(void)
     ESP_ERROR_CHECK(bsp_display_init(0, true, &io, &panel));
     ESP_ERROR_CHECK(bsp_touch_init());
 
-    ESP_ERROR_CHECK(input_init(INPUT_BACKEND_TOUCH_ZONES));
+    /* Only B1 (GPIO22) and B2 (GPIO27) are wired, both on the CN1 connector
+     * where the internal pull-ups suffice. B3 lives on GPIO35, which has no
+     * internal pull-up and would float without its external 10k — declaring it
+     * absent keeps the pin unread rather than inventing keypresses. */
+    input_set_present_mask(INPUT_B1 | INPUT_B2);
+    ESP_ERROR_CHECK(input_init(INPUT_BACKEND_GPIO));
 
     app_registry_scan();
 
