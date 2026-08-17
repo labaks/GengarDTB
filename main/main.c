@@ -29,15 +29,24 @@ static void chord_selftest(void *arg)
     const input_backend_t saved = input_get_backend();
     input_set_backend(INPUT_BACKEND_DEBUG_INJECT);
 
-    /* mask, hold_ms — expectation is written next to each line. */
-    static const struct { uint8_t mask; uint32_t hold; const char *expect; } script[] = {
-        { INPUT_B1,                          80,  "B1 click" },
-        { INPUT_B2,                          80,  "B2 click" },
-        { INPUT_B2,                          80,  "B2 click + B2 dblclick" },
-        { INPUT_B1 | INPUT_B2,              120,  "B1+B2 click (backlight step)" },
-        { INPUT_B1 | INPUT_B3,              120,  "B1+B3 click (home)" },
-        { INPUT_B3,                         700,  "B3 long + B3 release" },
-        { INPUT_MASK_ALL,                   700,  "B1+B2+B3 long (escape hatch)" },
+    /* mask, hold_ms, gap_ms after release, expectation.
+     *
+     * gap matters: the two B2 taps must land closer together than INPUT_DOUBLE_MS
+     * or no double-click is produced. hold + gap is the interval between the two
+     * CLICK events, so it has to stay comfortably under 300 ms. */
+    static const struct {
+        uint8_t     mask;
+        uint32_t    hold;
+        uint32_t    gap;
+        const char *expect;
+    } script[] = {
+        { INPUT_B1,             80, 250, "B1 click" },
+        { INPUT_B2,             80,  80, "B2 click" },
+        { INPUT_B2,             80, 250, "B2 click + B2 dblclick" },
+        { INPUT_B1 | INPUT_B2, 120, 250, "B1+B2 click (backlight step)" },
+        { INPUT_B1 | INPUT_B3, 120, 250, "B1+B3 click (home)" },
+        { INPUT_B3,            700, 250, "B3 long + B3 release" },
+        { INPUT_MASK_ALL,      700, 250, "B1+B2+B3 long (escape hatch)" },
     };
 
     for (size_t i = 0; i < sizeof(script) / sizeof(script[0]); i++) {
@@ -45,7 +54,7 @@ static void chord_selftest(void *arg)
         input_inject(script[i].mask);
         vTaskDelay(pdMS_TO_TICKS(script[i].hold));
         input_inject(0);
-        vTaskDelay(pdMS_TO_TICKS(250));
+        vTaskDelay(pdMS_TO_TICKS(script[i].gap));
     }
 
     ESP_LOGI(TAG, "--- chord self-test done, back to %d ---", (int)saved);
@@ -54,9 +63,294 @@ static void chord_selftest(void *arg)
 }
 #endif
 
+/* Set to 1 to skip the shell and run the display bring-up diagnostic instead:
+ * it bypasses LVGL entirely, reads the controller ID, and paints solid frames at
+ * several SPI clocks so a human can say which stage looked clean. */
+#define DESKOS_DISPLAY_DIAG 0
+
+#if DESKOS_DISPLAY_DIAG
+#include "esp_heap_caps.h"
+#include "esp_lcd_panel_ops.h"
+
+#define DIAG_CHUNK_LINES 40
+
+/* esp_lcd_panel_draw_bitmap ships the buffer to the panel byte for byte, and the
+ * ILI9341 wants RGB565 high byte first. A uint16_t on this CPU is little-endian,
+ * so every constant must be byte-swapped for the diagnostic to be a TRUSTWORTHY
+ * colour reference. Without this the test would show the very fault it is meant
+ * to detect. */
+#define RGB(c) ((uint16_t)__builtin_bswap16((uint16_t)(c)))
+
+#define C_RED    RGB(0xF800)
+#define C_GREEN  RGB(0x07E0)
+#define C_BLUE   RGB(0x001F)
+#define C_WHITE  RGB(0xFFFF)
+#define C_GRAY   RGB(0x8410)
+#define C_BLACK  RGB(0x0000)
+
+static esp_lcd_panel_handle_t s_diag_panel;
+
+/* Splits the rectangle so no single SPI transfer exceeds the bus limit set in
+ * bsp_display.c. Getting this wrong is silent: an oversized draw_bitmap is
+ * rejected and the panel simply keeps showing whatever was there before, which
+ * looks exactly like a rendering bug somewhere else entirely. */
+static void diag_rect(int x, int y, int w, int h, uint16_t raw)
+{
+    const size_t max_bytes = (size_t)BSP_LCD_H_RES * 80 * sizeof(uint16_t);
+
+    int lines = (int)(max_bytes / ((size_t)w * sizeof(uint16_t)));
+    if (lines < 1) {
+        lines = 1;
+    }
+    if (lines > h) {
+        lines = h;
+    }
+
+    uint16_t *buf = heap_caps_malloc((size_t)w * lines * sizeof(uint16_t), MALLOC_CAP_DMA);
+    if (!buf) {
+        ESP_LOGE(TAG, "diag: out of DMA memory for %dx%d", w, lines);
+        return;
+    }
+    for (size_t i = 0; i < (size_t)w * lines; i++) {
+        buf[i] = raw;
+    }
+
+    for (int yy = y; yy < y + h; yy += lines) {
+        const int n = (yy + lines > y + h) ? (y + h - yy) : lines;
+        const esp_err_t err = esp_lcd_panel_draw_bitmap(s_diag_panel, x, yy, x + w, yy + n, buf);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "draw_bitmap(%d,%d,%dx%d) failed: %s",
+                     x, yy, w, n, esp_err_to_name(err));
+            break;
+        }
+    }
+    free(buf);
+}
+
+static void diag_fill(int w, int h, uint16_t raw)
+{
+    diag_rect(0, 0, w, h, raw);
+}
+
+/* SPI is deliberately dropped to 20 MHz for the whole diagnostic so that clock
+ * rate cannot be confused with a geometry or driver fault. */
+#define DIAG_PCLK (20 * 1000 * 1000)
+
+/* Colour-order probe.
+ *
+ * Geometry and driver are settled (ST7789, swap_xy + mirror_x). What is left is
+ * two independent binary unknowns: the byte order of each RGB565 word on the
+ * wire, and whether the panel is wired RGB or BGR. Four combinations, so rather
+ * than reason about them we show all four and let a human read the answer off
+ * the screen. Swapping the R and B fields in software is equivalent to flipping
+ * rgb_ele_order, which keeps this to a single panel init.
+ *
+ * Loops forever on purpose: a one-shot sweep is easy to miss. */
+static uint16_t mk_colour(uint8_t r5, uint8_t g6, uint8_t b5, bool rb_swap, bool byte_swap)
+{
+    const uint16_t v = rb_swap ? (uint16_t)((b5 << 11) | (g6 << 5) | r5)
+                               : (uint16_t)((r5 << 11) | (g6 << 5) | b5);
+    return byte_swap ? (uint16_t)__builtin_bswap16(v) : v;
+}
+
+static void colour_probe(void)
+{
+    esp_lcd_panel_io_handle_t io = NULL;
+    ESP_ERROR_CHECK(bsp_display_init_driver(BSP_LCD_DRIVER_ST7789, DIAG_PCLK, true,
+                                            &io, &s_diag_panel));
+    bsp_backlight_set(100);
+
+    const int w = BSP_LCD_H_RES, h = BSP_LCD_V_RES, band = h / 3;
+
+    ESP_LOGW(TAG, "=== COLOUR PROBE, loops forever ===");
+    ESP_LOGW(TAG, "  each combo paints three bands: TOP, MIDDLE, BOTTOM");
+    ESP_LOGW(TAG, "  the CORRECT combo shows TOP=RED, MIDDLE=GREEN, BOTTOM=BLUE");
+    ESP_LOGW(TAG, "  tell me the combo number that looks right");
+
+    const struct { bool rb, bs; } combos[] = {
+        { false, true  },   /* 1: byte-swapped, RGB   (what we ship today) */
+        { true,  true  },   /* 2: byte-swapped, R/B exchanged              */
+        { false, false },   /* 3: raw order,    RGB                        */
+        { true,  false },   /* 4: raw order,    R/B exchanged              */
+    };
+
+    for (;;) {
+        for (unsigned i = 0; i < 4; i++) {
+            ESP_LOGW(TAG, "  >>> COMBO %u: rb_swap=%d byte_swap=%d",
+                     i + 1, combos[i].rb, combos[i].bs);
+
+            diag_rect(0, 0,          w, band,          mk_colour(31, 0,  0,  combos[i].rb, combos[i].bs));
+            diag_rect(0, band,       w, band,          mk_colour(0,  63, 0,  combos[i].rb, combos[i].bs));
+            diag_rect(0, 2 * band,   w, h - 2 * band,  mk_colour(0,  0,  31, combos[i].rb, combos[i].bs));
+
+            /* The combo number, on screen. Without this the viewer sees colours
+             * but has no way to tell which combination produced them — the log
+             * lives on the other end of a cable they are not watching.
+             * Black reads unambiguously on every colour we paint here, and it is
+             * the one value that is identical in all four encodings. */
+            for (unsigned k = 0; k <= i; k++) {
+                diag_rect(12 + (int)k * 26, 12, 18, 18, 0x0000);
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(5000));
+        }
+    }
+}
+
+static void diag_stage(unsigned n, bsp_lcd_driver_t drv, bool landscape)
+{
+    esp_lcd_panel_io_handle_t io = NULL;
+    s_diag_panel = NULL;
+
+    if (bsp_display_init_driver(drv, DIAG_PCLK, landscape, &io, &s_diag_panel) != ESP_OK) {
+        ESP_LOGE(TAG, "STAGE %u: init failed", n);
+        return;
+    }
+    bsp_backlight_set(100);
+
+    const int w = landscape ? BSP_LCD_H_RES : BSP_LCD_V_RES;
+    const int h = landscape ? BSP_LCD_V_RES : BSP_LCD_H_RES;
+
+    ESP_LOGW(TAG, ">>> STAGE %u: %s, %s (%dx%d)", n,
+             drv == BSP_LCD_DRIVER_ST7789 ? "ST7789" : "ILI9341",
+             landscape ? "landscape" : "native", w, h);
+
+    /* Solid red first: the only question here is whether the WHOLE screen fills. */
+    diag_fill(w, h, C_RED);
+    vTaskDelay(pdMS_TO_TICKS(1800));
+
+    /* Then the geometry pattern. */
+    diag_fill(w, h, C_WHITE);
+    diag_rect(0, 0, w, 10, C_GREEN);              /* stripe along the top edge  */
+    diag_rect(0, 0, 56, 56, C_RED);               /* marker: TOP-LEFT           */
+    diag_rect(w - 56, h - 56, 56, 56, C_BLUE);    /* marker: BOTTOM-RIGHT       */
+    vTaskDelay(pdMS_TO_TICKS(4500));
+
+    bsp_display_deinit(io, s_diag_panel);
+}
+
+/* Geometry probe, built from black and white only.
+ *
+ * Colour reports have been contradictory, and colour cannot be trusted to
+ * describe geometry while the encoding itself is in question. Black (0x0000)
+ * and white (0xFFFF) are the two values that are identical under every byte
+ * order and channel order, so this draws with nothing else.
+ *
+ * Rendered one row at a time (320 px = 640 bytes, far below the transfer limit),
+ * which makes the row stride explicit. A closed border plus a straight diagonal
+ * means width, height and stride all agree. A diagonal that bends, or a border
+ * that fails to close, means the panel is consuming a different number of bytes
+ * per pixel than we are sending. */
+static void geometry_draw(int w, int h, unsigned combo)
+{
+    uint16_t *row = heap_caps_malloc((size_t)w * sizeof(uint16_t), MALLOC_CAP_DMA);
+    if (!row) {
+        ESP_LOGE(TAG, "geometry probe: out of DMA memory");
+        return;
+    }
+
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            row[x] = C_BLACK;
+        }
+
+        if (y == 0 || y == h - 1) {
+            for (int x = 0; x < w; x++) {
+                row[x] = C_WHITE;                  /* top and bottom border     */
+            }
+        } else {
+            row[0] = row[w - 1] = C_WHITE;         /* left and right border     */
+            row[(y * w) / h] = C_WHITE;            /* diagonal, TL -> BR        */
+        }
+
+        /* Combo counter: `combo` white ticks in the TOP-LEFT area, and a solid
+         * red block marking the TOP-LEFT corner so mirroring is unambiguous. */
+        if (y >= 8 && y < 26) {
+            for (unsigned k = 0; k < combo; k++) {
+                for (int x = 8 + (int)k * 24; x < 8 + (int)k * 24 + 16 && x < w; x++) {
+                    row[x] = C_WHITE;
+                }
+            }
+        }
+        if (y >= 34 && y < 74) {
+            for (int x = 8; x < 48 && x < w; x++) {
+                row[x] = C_RED;
+            }
+        }
+
+        esp_lcd_panel_draw_bitmap(s_diag_panel, 0, y, w, y + 1, row);
+    }
+    free(row);
+}
+
+static void geometry_probe(void)
+{
+    ESP_LOGW(TAG, "=== GEOMETRY PROBE, loops forever ===");
+    ESP_LOGW(TAG, "  looking for: a WHITE BORDER that touches ALL FOUR edges,");
+    ESP_LOGW(TAG, "               a STRAIGHT diagonal running TOP-LEFT to BOTTOM-RIGHT,");
+    ESP_LOGW(TAG, "               the RED block and the tick marks in the TOP-LEFT corner.");
+    ESP_LOGW(TAG, "  ticks = combo number. Report the combo that satisfies all three.");
+
+    const struct { bool swap, mx, my; const char *what; } combos[] = {
+        { false, false, false, "native 240x320" },
+        { true,  true,  false, "landscape, mirror_x" },
+        { true,  false, true,  "landscape, mirror_y" },
+        { true,  false, false, "landscape, no mirror" },
+        { true,  true,  true,  "landscape, both mirrors" },
+    };
+    const unsigned n = sizeof(combos) / sizeof(combos[0]);
+
+    esp_lcd_panel_io_handle_t io = NULL;
+    ESP_ERROR_CHECK(bsp_display_init_driver(BSP_LCD_DRIVER_ST7789, DIAG_PCLK, false,
+                                            &io, &s_diag_panel));
+    bsp_backlight_set(100);
+
+    for (;;) {
+        for (unsigned i = 0; i < n; i++) {
+            ESP_LOGW(TAG, "  >>> COMBO %u (%u ticks): %s",
+                     i + 1, i + 1, combos[i].what);
+            bsp_display_set_rotation(s_diag_panel, combos[i].swap, combos[i].mx, combos[i].my);
+
+            const int w = combos[i].swap ? BSP_LCD_H_RES : BSP_LCD_V_RES;
+            const int h = combos[i].swap ? BSP_LCD_V_RES : BSP_LCD_H_RES;
+            geometry_draw(w, h, i + 1);
+
+            vTaskDelay(pdMS_TO_TICKS(6000));
+        }
+    }
+}
+
+static void display_diag(void)
+{
+    geometry_probe();
+    return;
+
+    /* Driver and geometry are settled; go straight to the colour question. */
+    colour_probe();   /* never returns */
+
+    ESP_LOGW(TAG, "=== display diagnostic: 4 stages, SPI fixed at 20 MHz ===");
+    ESP_LOGW(TAG, "  each stage: (1) full RED  -> does the ENTIRE screen fill?");
+    ESP_LOGW(TAG, "              (2) WHITE with GREEN stripe on TOP edge,");
+    ESP_LOGW(TAG, "                  RED square TOP-LEFT, BLUE square BOTTOM-RIGHT");
+    ESP_LOGW(TAG, "  report for each stage: full coverage yes/no, pattern correct yes/no");
+
+    diag_stage(1, BSP_LCD_DRIVER_ILI9341, false);   /* native  240x320 */
+    diag_stage(2, BSP_LCD_DRIVER_ILI9341, true);    /* rotated 320x240 */
+    diag_stage(3, BSP_LCD_DRIVER_ST7789,  false);   /* native  240x320 */
+    diag_stage(4, BSP_LCD_DRIVER_ST7789,  true);    /* rotated 320x240 */
+
+    ESP_LOGW(TAG, "=== diagnostic done — screen left on STAGE 4 ===");
+}
+#endif /* DESKOS_DISPLAY_DIAG */
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "deskos booting, free heap %lu", (unsigned long)esp_get_free_heap_size());
+
+#if DESKOS_DISPLAY_DIAG
+    display_diag();
+    return;
+#endif
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -74,7 +368,8 @@ void app_main(void)
 
     esp_lcd_panel_io_handle_t io = NULL;
     esp_lcd_panel_handle_t panel = NULL;
-    ESP_ERROR_CHECK(bsp_display_init(&io, &panel));
+    /* Landscape is set on the panel here; LVGL must not rotate again. */
+    ESP_ERROR_CHECK(bsp_display_init(0, true, &io, &panel));
     ESP_ERROR_CHECK(bsp_touch_init());
 
     ESP_ERROR_CHECK(input_init(INPUT_BACKEND_TOUCH_ZONES));

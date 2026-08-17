@@ -15,10 +15,47 @@ extern "C" {
 
 /* ---------------- Display ---------------- */
 
+/* Which controller to drive. CYD batches are not consistent: some carry an
+ * ILI9341, some an ST7789, and their command sets overlap enough that the wrong
+ * driver "almost works" — partial fills, wrapped writes, striping. */
+typedef enum {
+    BSP_LCD_DRIVER_ILI9341,
+    BSP_LCD_DRIVER_ST7789,
+} bsp_lcd_driver_t;
+
+/* Same as bsp_display_init but lets the caller pick the controller. */
+esp_err_t bsp_display_init_driver(bsp_lcd_driver_t driver, uint32_t pclk_hz, bool landscape,
+                                  esp_lcd_panel_io_handle_t *out_io,
+                                  esp_lcd_panel_handle_t *out_panel);
+
 /* Brings up SPI2, the ILI9341 panel and the LEDC backlight channel.
- * Hands back the esp_lcd handles so the caller can attach LVGL to them. */
-esp_err_t bsp_display_init(esp_lcd_panel_io_handle_t *out_io,
+ * Hands back the esp_lcd handles so the caller can attach LVGL to them.
+ *
+ * pclk_hz: pass 0 for BSP_LCD_PIXEL_CLOCK_HZ. Overridable so the display
+ * diagnostic can sweep clock rates without rebuilding.
+ *
+ * landscape: when true the panel itself is rotated to 320x240 here, via
+ * swap_xy/mirror. Do NOT also ask esp_lvgl_port to rotate — doing both leaves
+ * LVGL flushing 320-wide rows into a 240-wide address window, which wraps and
+ * produces diagonal stripes over whatever was in GRAM before. */
+esp_err_t bsp_display_init(uint32_t pclk_hz, bool landscape,
+                           esp_lcd_panel_io_handle_t *out_io,
                            esp_lcd_panel_handle_t *out_panel);
+
+/* Tears the panel down but leaves the SPI bus and backlight up, so the caller
+ * can re-init at a different clock. Diagnostic use. */
+esp_err_t bsp_display_deinit(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel);
+
+/* Applies orientation to a live panel. Used by the diagnostic to sweep mirror
+ * combinations without re-initialising anything. */
+esp_err_t bsp_display_set_rotation(esp_lcd_panel_handle_t panel,
+                                   bool swap_xy, bool mirror_x, bool mirror_y);
+
+/* Reads the controller ID registers over MISO. ILI9341 answers 0xD3 with
+ * 00 93 41; ST7789 answers 0x04 with 85 85 52. Returns ESP_OK if the bus
+ * replied at all — the caller interprets the bytes. */
+esp_err_t bsp_display_probe_id(esp_lcd_panel_io_handle_t io,
+                               uint8_t out_d3[3], uint8_t out_04[3]);
 
 /* 0..100. Perceptually non-linear (raw LEDC duty); good enough for a menu slider. */
 esp_err_t bsp_backlight_set(uint8_t percent);

@@ -1,5 +1,7 @@
 #include "bsp.h"
 
+#include <string.h>
+
 #include "driver/ledc.h"
 #include "driver/spi_master.h"
 #include "esp_check.h"
@@ -59,10 +61,65 @@ uint8_t bsp_backlight_get(void)
     return s_backlight_pct;
 }
 
-esp_err_t bsp_display_init(esp_lcd_panel_io_handle_t *out_io,
+esp_err_t bsp_display_deinit(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel)
+{
+    if (panel) {
+        esp_lcd_panel_del(panel);
+    }
+    if (io) {
+        esp_lcd_panel_io_del(io);
+    }
+    return ESP_OK;
+}
+
+esp_err_t bsp_display_set_rotation(esp_lcd_panel_handle_t panel,
+                                   bool swap_xy, bool mirror_x, bool mirror_y)
+{
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(panel, swap_xy), TAG, "swap_xy");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(panel, mirror_x, mirror_y), TAG, "mirror");
+    return ESP_OK;
+}
+
+esp_err_t bsp_display_probe_id(esp_lcd_panel_io_handle_t io,
+                               uint8_t out_d3[3], uint8_t out_04[3])
+{
+    esp_err_t err = ESP_OK;
+
+    if (out_d3) {
+        memset(out_d3, 0, 3);
+        err = esp_lcd_panel_io_rx_param(io, 0xD3, out_d3, 3);
+    }
+    if (out_04) {
+        memset(out_04, 0, 3);
+        const esp_err_t e2 = esp_lcd_panel_io_rx_param(io, 0x04, out_04, 3);
+        if (err == ESP_OK) {
+            err = e2;
+        }
+    }
+    return err;
+}
+
+esp_err_t bsp_display_init(uint32_t pclk_hz, bool landscape,
+                           esp_lcd_panel_io_handle_t *out_io,
                            esp_lcd_panel_handle_t *out_panel)
 {
+    /* ST7789, confirmed empirically on this board: with the ILI9341 driver the
+     * address window wrapped, leaving partial fills and duplicated markers.
+     * Under ST7789 a full-screen fill covers the whole panel and the corner
+     * markers land where they are drawn. */
+    return bsp_display_init_driver(BSP_LCD_DRIVER_ST7789, pclk_hz, landscape,
+                                   out_io, out_panel);
+}
+
+esp_err_t bsp_display_init_driver(bsp_lcd_driver_t driver, uint32_t pclk_hz, bool landscape,
+                                  esp_lcd_panel_io_handle_t *out_io,
+                                  esp_lcd_panel_handle_t *out_panel)
+{
     ESP_RETURN_ON_FALSE(out_io && out_panel, ESP_ERR_INVALID_ARG, TAG, "null out params");
+
+    if (pclk_hz == 0) {
+        pclk_hz = BSP_LCD_PIXEL_CLOCK_HZ;
+    }
 
     ESP_RETURN_ON_ERROR(backlight_init(), TAG, "backlight");
 
@@ -76,16 +133,25 @@ esp_err_t bsp_display_init(esp_lcd_panel_io_handle_t *out_io,
         .miso_io_num     = BSP_LCD_PIN_MISO,
         .quadwp_io_num   = -1,
         .quadhd_io_num   = -1,
-        /* Must be >= the largest LVGL flush. 40 lines of RGB565 is our buffer height. */
-        .max_transfer_sz = BSP_LCD_H_RES * 40 * sizeof(uint16_t),
+        /* Must be >= the largest single draw_bitmap, not just the largest LVGL
+         * flush. Sized for 80 lines rather than the 40 LVGL uses, because a
+         * transfer over this limit is rejected — and esp_lcd_panel_draw_bitmap
+         * reports that only through its return value, so an unchecked caller
+         * sees the screen silently keep its old contents. */
+        .max_transfer_sz = BSP_LCD_H_RES * 80 * sizeof(uint16_t),
     };
-    ESP_RETURN_ON_ERROR(spi_bus_initialize(BSP_LCD_SPI_HOST, &bus, SPI_DMA_CH_AUTO),
-                        TAG, "spi bus init");
+    const esp_err_t bus_err = spi_bus_initialize(BSP_LCD_SPI_HOST, &bus, SPI_DMA_CH_AUTO);
+    /* Tolerate a second call: the diagnostic re-inits the panel at other clocks
+     * while the bus stays up. */
+    if (bus_err != ESP_OK && bus_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "spi bus init: %s", esp_err_to_name(bus_err));
+        return bus_err;
+    }
 
     const esp_lcd_panel_io_spi_config_t io_cfg = {
         .dc_gpio_num       = BSP_LCD_PIN_DC,
         .cs_gpio_num       = BSP_LCD_PIN_CS,
-        .pclk_hz           = BSP_LCD_PIXEL_CLOCK_HZ,
+        .pclk_hz           = pclk_hz,
         .lcd_cmd_bits      = 8,
         .lcd_param_bits    = 8,
         .spi_mode          = 0,
@@ -100,11 +166,18 @@ esp_err_t bsp_display_init(esp_lcd_panel_io_handle_t *out_io,
 
     const esp_lcd_panel_dev_config_t panel_cfg = {
         .reset_gpio_num = BSP_LCD_PIN_RST,
-        .rgb_ele_order  = LCD_RGB_ELEMENT_ORDER_BGR,  /* CYD panels are BGR-wired */
+        /* RGB, not BGR. Determined on the bench: with BGR the red and blue
+         * channels came out exchanged. Much CYD material claims BGR — that
+         * evidently does not hold for this batch. */
+        .rgb_ele_order  = LCD_RGB_ELEMENT_ORDER_RGB,
         .bits_per_pixel = 16,
     };
     esp_lcd_panel_handle_t panel = NULL;
-    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_ili9341(io, &panel_cfg, &panel), TAG, "ili9341");
+    if (driver == BSP_LCD_DRIVER_ST7789) {
+        ESP_RETURN_ON_ERROR(esp_lcd_new_panel_st7789(io, &panel_cfg, &panel), TAG, "st7789");
+    } else {
+        ESP_RETURN_ON_ERROR(esp_lcd_new_panel_ili9341(io, &panel_cfg, &panel), TAG, "ili9341");
+    }
 
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(panel), TAG, "reset");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(panel), TAG, "init");
@@ -113,14 +186,23 @@ esp_err_t bsp_display_init(esp_lcd_panel_io_handle_t *out_io,
      * negative, flip this to true — that is the whole fix. */
     ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(panel, false), TAG, "invert");
 
-    /* Landscape rotation is applied by esp_lvgl_port via its rotation config,
-     * so we intentionally do NOT call swap_xy/mirror here — doing both
-     * double-rotates and is a classic source of a mirrored UI. */
+    /* Rotation is applied to the PANEL here, not by esp_lvgl_port. The panel's
+     * native orientation is 240x320 portrait; swapping axes gives the 320x240
+     * landscape that LVGL is told about. Only one layer may rotate — if LVGL
+     * also rotates, it flushes 320-wide rows into a 240-wide address window,
+     * the writes wrap, and the screen fills with diagonal stripes over whatever
+     * the previous firmware left in GRAM. */
+    if (landscape) {
+        ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(panel, true), TAG, "swap_xy");
+        ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(panel, true, false), TAG, "mirror");
+    }
 
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), TAG, "disp on");
 
-    ESP_LOGI(TAG, "ILI9341 up: %dx%d, SPI2 @ %d MHz",
-             BSP_LCD_H_RES, BSP_LCD_V_RES, BSP_LCD_PIXEL_CLOCK_HZ / 1000000);
+    ESP_LOGI(TAG, "panel up: %s, %s, SPI2 @ %lu MHz",
+             driver == BSP_LCD_DRIVER_ST7789 ? "ST7789" : "ILI9341",
+             landscape ? "320x240 landscape" : "240x320 native",
+             (unsigned long)(pclk_hz / 1000000));
 
     *out_io = io;
     *out_panel = panel;

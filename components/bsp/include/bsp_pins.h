@@ -26,9 +26,12 @@
 #define BSP_LCD_H_RES           320
 #define BSP_LCD_V_RES           240
 
-/* 40 MHz is the safe figure for the CYD's ILI9341. 80 MHz is reported unstable on
- * some units; do not raise this without testing for torn/garbled frames. */
-#define BSP_LCD_PIXEL_CLOCK_HZ  (40 * 1000 * 1000)
+/* 20 MHz is the rate this board was actually verified at, end to end, with a
+ * closed border and a straight diagonal. 40 MHz is the usual figure quoted for
+ * these panels and is probably fine, but it has not been proven here — raise it
+ * only while watching for tearing or garbled rows. At 20 MHz a full-screen
+ * repaint costs roughly 60 ms, and the shell repaints partial areas anyway. */
+#define BSP_LCD_PIXEL_CLOCK_HZ  (20 * 1000 * 1000)
 
 /* ---- Touch: XPT2046, bit-banged software SPI (see note above) ---- */
 #define BSP_TOUCH_PIN_CLK       25

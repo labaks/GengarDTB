@@ -24,7 +24,10 @@
 static const char *TAG = "shell";
 
 #define LCD_BUFFER_LINES  40      /* the main heap knob: 320*40*2 = 25 KB per buffer */
-#define BACKLIGHT_DEFAULT 80
+/* This panel leaks a fair amount of backlight through black pixels — at full
+ * brightness a dark UI reads as washed-out blue-grey rather than black. 55%
+ * keeps it legible indoors while letting the dark theme actually look dark. */
+#define BACKLIGHT_DEFAULT 55
 
 static lv_display_t *s_disp;
 static lv_group_t   *s_group;
@@ -268,16 +271,18 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
         .hres          = BSP_LCD_H_RES,
         .vres          = BSP_LCD_V_RES,
         .monochrome    = false,
-        /* The panel is natively 240x320 portrait; this turns it into 320x240
-         * landscape. Rotation is applied HERE and nowhere else — also doing
-         * swap_xy/mirror in bsp_display.c would double-rotate the image. */
-        .rotation = {
-            .swap_xy  = true,
-            .mirror_x = true,
-            .mirror_y = false,
-        },
+        /* NO rotation here on purpose. bsp_display_init() already put the panel
+         * into 320x240 landscape via swap_xy/mirror, so LVGL must treat the
+         * display as plain 320x240. Rotating in both layers is what produced the
+         * striped garbage on the first flash. */
         .flags = {
             .buff_dma = true,
+            /* LVGL lays RGB565 out as native little-endian uint16, the panel
+             * wants the high byte first. Verified on the bench: without this
+             * the colours are wrong in a way that greys hide almost completely,
+             * which is why the first symptom read as "washed out" rather than
+             * "wrong colour". */
+            .swap_bytes = true,
         },
     };
     s_disp = lvgl_port_add_disp(&disp_cfg);
