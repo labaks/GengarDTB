@@ -1,0 +1,25 @@
+# ESP-IDF build output
+build/
+managed_components/
+dependencies.lock
+
+# Active config is machine-local; sdkconfig.defaults is the tracked source of truth.
+sdkconfig
+sdkconfig.old
+sdkconfig.ci
+
+# Never commit the flash dump — it contains WiFi credentials from NVS.
+*.bin
+!apps/**/*.bin
+
+# Secrets: WiFi credentials, API keys for widgets during development.
+secrets.h
+secrets.json
+*.local.json
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

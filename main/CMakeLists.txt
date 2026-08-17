@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "main.c"
+    REQUIRES
+        bsp
+        input
+        shell
+        nvs_flash
+        esp_lcd
+)

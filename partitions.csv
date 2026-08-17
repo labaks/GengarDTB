@@ -1,0 +1,11 @@
+# deskos partition table — ESP32, 4 MB flash
+# Dual OTA with rollback + small LittleFS for config/cache/bindings.
+# Widget apps, fonts and images live on microSD, NOT here — 4 MB is too tight.
+#
+# Name,     Type, SubType,  Offset,   Size
+nvs,        data, nvs,      0x9000,   0x5000
+otadata,    data, ota,      0xe000,   0x2000
+ota_0,      app,  ota_0,    0x10000,  0x1A0000
+ota_1,      app,  ota_1,    0x1B0000, 0x1A0000
+storage,    data, littlefs, 0x350000, 0x90000
+coredump,   data, coredump, 0x3E0000, 0x10000

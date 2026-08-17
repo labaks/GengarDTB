@@ -1,0 +1,10 @@
+{
+  "api": 1,
+  "id": "hello",
+  "name": "Hello",
+  "version": "0.1.0",
+  "layer": "declarative",
+  "entry": "ui.jsonl",
+  "capabilities": ["time"],
+  "poll_sec": 60
+}

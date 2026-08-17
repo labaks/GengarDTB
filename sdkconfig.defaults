@@ -1,0 +1,56 @@
+# deskos — ESP32-2432S028R (CYD), ESP32-D0WD-V3, 4 MB flash, NO PSRAM.
+# Rationale for the non-obvious settings is in CLAUDE.md.
+
+CONFIG_IDF_TARGET="esp32"
+
+# --- flash / partitions ---
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- CPU / RTOS ---
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+
+# --- size matters: 1664 KB per OTA slot, and LVGL+WiFi+TLS is fat ---
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# Panic behaviour is left at the default (print + reboot). It is a Kconfig `choice`,
+# so a member cannot be set to `n` — you select a different member instead.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+
+# No Bluetooth — we do not need it and it costs ~300 KB of flash.
+CONFIG_BT_ENABLED=n
+
+# --- filesystem ---
+# Long filenames on the SD card, allocated from the heap rather than the stack.
+# The default OEM codepage (437) is deliberate: app directory names are ASCII by
+# contract (see docs/app-format.md), and IDF offers no Windows-1251 anyway — only
+# OEM-866 — so paying for a wider codepage buys nothing here.
+CONFIG_FATFS_LFN_HEAP=y
+
+# --- LVGL 9 ---
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_MEM_SIZE_KILOBYTES=40
+CONFIG_LV_DEF_REFR_PERIOD=16
+CONFIG_LV_USE_LOG=y
+CONFIG_LV_LOG_LEVEL_WARN=y
+# NOTE: LVGL's bundled Montserrat fonts cover ASCII/Latin-1 and symbols only — there is
+# NO Cyrillic in them. Russian UI text therefore needs a font generated with lv_font_conv
+# (or LVGL's binary font format loaded from SD). Until that exists the shell uses Latin
+# labels; see docs/TODO in CLAUDE.md. Do not assume these fonts render Cyrillic.
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
+# Widgets we actually use in the shell. Keep the rest off to save flash.
+CONFIG_LV_USE_LABEL=y
+CONFIG_LV_USE_BUTTON=y
+CONFIG_LV_USE_LIST=y
+CONFIG_LV_USE_IMAGE=y
+CONFIG_LV_USE_BAR=y
+CONFIG_LV_USE_ARC=y

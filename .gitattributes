@@ -1,0 +1,6 @@
+# Keep LF in the repository. ESP-IDF, CMake and the toolchain are all fine with LF on
+# Windows, and mixed endings make diffs on this project unreadable.
+* text=auto eol=lf
+
+*.png binary
+*.bin binary

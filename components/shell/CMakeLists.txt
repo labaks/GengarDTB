@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "shell.c"
+        "app_registry.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        bsp
+        input
+        esp_lcd
+        json
+)

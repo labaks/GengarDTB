@@ -1,0 +1,18 @@
+idf_component_register(
+    SRCS
+        "bsp_display.c"
+        "bsp_touch.c"
+        "bsp_storage.c"
+        "bsp_led.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        esp_lcd
+        esp_driver_spi
+        esp_driver_gpio
+        esp_driver_ledc
+        esp_driver_sdspi
+        sdmmc
+        fatfs
+        vfs
+)
