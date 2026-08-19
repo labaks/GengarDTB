@@ -23,3 +23,9 @@ secrets.json
 *.swp
 Thumbs.db
 desktop.ini
+
+# agent/ — the Windows PC agent (.NET), build output and per-user IDE state.
+# Its own config.json (token, port) lives in %LOCALAPPDATA%\DeskosAgent, not here.
+agent/**/bin/
+agent/**/obj/
+*.csproj.user
