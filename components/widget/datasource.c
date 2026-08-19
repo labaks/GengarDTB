@@ -55,7 +55,7 @@ const cJSON *datasource_resolve(const cJSON *root, const char *path)
 
 bool datasource_truthy(const cJSON *node)
 {
-    if (!node) {
+    if (!node || cJSON_IsNull(node)) {
         return false;
     }
     if (cJSON_IsBool(node)) {

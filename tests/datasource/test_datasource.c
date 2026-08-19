@@ -264,7 +264,7 @@ static void test_truthy(void)
 {
     cJSON *root = cJSON_Parse(
         "{\"t\":true,\"f\":false,\"n0\":0,\"n1\":5,\"s_empty\":\"\",\"s_zero\":\"0\","
-        "\"s_false\":\"false\",\"s_text\":\"yes\",\"arr_empty\":[],\"arr_full\":[1]}");
+        "\"s_false\":\"false\",\"s_text\":\"yes\",\"arr_empty\":[],\"arr_full\":[1],\"nul\":null}");
 
     CHECK(datasource_truthy(NULL) == false, "missing must be falsy");
     CHECK(datasource_truthy(cJSON_GetObjectItem(root, "t")) == true, "true must be truthy");
@@ -280,6 +280,8 @@ static void test_truthy(void)
           "an empty array must be falsy");
     CHECK(datasource_truthy(cJSON_GetObjectItem(root, "arr_full")) == true,
           "a non-empty array must be truthy");
+    CHECK(datasource_truthy(cJSON_GetObjectItem(root, "nul")) == false,
+          "JSON null must be falsy, same bucket as a missing field");
 
     cJSON_Delete(root);
 }

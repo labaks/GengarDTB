@@ -17,4 +17,6 @@ idf_component_register(
         "builtin/weather.ui.jsonl"
         "builtin/clock.manifest.json"
         "builtin/clock.ui.jsonl"
+        "builtin/system.manifest.json"
+        "builtin/system.ui.jsonl"
 )

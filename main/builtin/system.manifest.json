@@ -1,0 +1,9 @@
+{
+  "api": 1,
+  "id": "system",
+  "name": "System",
+  "version": "0.1.0",
+  "layer": "declarative",
+  "entry": "ui.jsonl",
+  "capabilities": ["host"]
+}
