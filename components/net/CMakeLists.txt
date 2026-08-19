@@ -9,4 +9,8 @@ idf_component_register(
         esp_event
         nvs_flash
         lwip
+        bsp
+        json
+        esp_http_server
+        esp_timer
 )

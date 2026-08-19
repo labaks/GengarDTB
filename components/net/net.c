@@ -1,13 +1,19 @@
 #include "net.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
+#include "bsp_pins.h"
+#include "cJSON.h"
 #include "esp_check.h"
 #include "esp_event.h"
+#include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -20,6 +26,8 @@ static const char *TAG = "net";
 #define NVS_KEY_SSID  "wifi_ssid"
 #define NVS_KEY_PASS  "wifi_pass"
 #define NVS_KEY_TZ    "tz"
+
+#define WIFI_JSON_PATH BSP_SD_MOUNT_POINT "/wifi.json"
 
 /* Reconnect backoff. Capped rather than unbounded: this device sits on a desk
  * and the access point may simply be off for the night — it should keep trying
@@ -59,9 +67,54 @@ static void fill_sta_config(wifi_config_t *cfg)
 
 /* ------------------------------------------------------------- credentials */
 
+/* {"ssid":"...","password":"..."} on the microSD card. Swapping the card is
+ * the easiest way to move the device to a different network or hand it to
+ * someone else, without a rebuild and without touching NVS. When present, it
+ * always wins over whatever NVS holds. */
+static bool load_credentials_from_sd(void)
+{
+    FILE *f = fopen(WIFI_JSON_PATH, "rb");
+    if (!f) {
+        return false;
+    }
+
+    char buf[320];
+    const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        ESP_LOGW(TAG, "%s: not valid JSON, ignoring", WIFI_JSON_PATH);
+        return false;
+    }
+
+    const char *ssid = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "ssid"));
+    bool ok = false;
+    if (ssid && *ssid) {
+        const char *pass = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "password"));
+        snprintf(s_ssid, sizeof(s_ssid), "%s", ssid);
+        snprintf(s_pass, sizeof(s_pass), "%s", pass ? pass : "");
+        ok = true;
+    } else {
+        ESP_LOGW(TAG, "%s: missing 'ssid', ignoring", WIFI_JSON_PATH);
+    }
+
+    cJSON_Delete(root);
+    if (ok) {
+        /* Never log the password — only the SSID, same rule as everywhere else here. */
+        ESP_LOGI(TAG, "credentials loaded from %s (ssid '%s')", WIFI_JSON_PATH, s_ssid);
+    }
+    return ok;
+}
+
 static bool load_credentials(void)
 {
     s_ssid[0] = s_pass[0] = '\0';
+
+    if (load_credentials_from_sd()) {
+        return true;
+    }
 
     nvs_handle_t h;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
@@ -85,7 +138,7 @@ static bool load_credentials(void)
     return s_ssid[0] != '\0';
 }
 
-esp_err_t net_set_credentials(const char *ssid, const char *password)
+static esp_err_t persist_credentials(const char *ssid, const char *password)
 {
     nvs_handle_t h;
     ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h), TAG, "nvs open");
@@ -105,7 +158,12 @@ esp_err_t net_set_credentials(const char *ssid, const char *password)
         err = nvs_commit(h);
     }
     nvs_close(h);
+    return err;
+}
 
+esp_err_t net_set_credentials(const char *ssid, const char *password)
+{
+    const esp_err_t err = persist_credentials(ssid, password);
     if (err != ESP_OK) {
         return err;
     }
@@ -114,7 +172,25 @@ esp_err_t net_set_credentials(const char *ssid, const char *password)
     ESP_LOGI(TAG, "credentials updated (ssid '%s')", ssid ? ssid : "<cleared>");
 
     esp_wifi_disconnect();
-    if (load_credentials()) {
+
+    bool have_creds;
+    if (ssid && *ssid) {
+        /* Apply what was just passed in directly, rather than re-deriving it
+         * through load_credentials(). That function checks /sd/wifi.json
+         * first by design (see CLAUDE.md) — correct on boot, but wrong here:
+         * credentials someone just typed through the setup screen must win
+         * immediately, not be silently overridden by a file still sitting on
+         * the card from a previous owner or network. */
+        snprintf(s_ssid, sizeof(s_ssid), "%s", ssid);
+        snprintf(s_pass, sizeof(s_pass), "%s", password ? password : "");
+        have_creds = true;
+    } else {
+        /* Cleared: fall through the normal priority chain (SD file, then the
+         * build-time default) instead of going straight to "no network". */
+        have_creds = load_credentials();
+    }
+
+    if (have_creds) {
         wifi_config_t cfg;
         fill_sta_config(&cfg);
         ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &cfg), TAG, "set config");
@@ -134,6 +210,233 @@ bool net_get_ssid(char *out, size_t out_size)
     }
     snprintf(out, out_size, "%s", s_ssid);
     return true;
+}
+
+/* --------------------------------------------------------- WiFi setup (AP) */
+
+/* There is no keyboard on this device, so entering an arbitrary SSID/password
+ * happens on a phone or laptop instead: the device opens its own open AP and
+ * serves one plain HTML form at 192.168.4.1 (the address esp_netif hands out
+ * to the AP interface by default — same address the factory firmware used
+ * for its captive portal, see CLAUDE.md). No DNS hijack / auto-popup: the
+ * setup screen just tells the user to open the address manually. */
+
+static esp_netif_t      *s_ap_netif;
+static httpd_handle_t    s_softap_httpd;
+static esp_timer_handle_t s_softap_apply_timer;
+static bool               s_softap_active;
+static char               s_pending_ssid[sizeof(s_ssid)];
+static char               s_pending_pass[sizeof(s_pass)];
+
+static void url_decode(char *dst, size_t dst_size, const char *src)
+{
+    size_t o = 0;
+    for (size_t i = 0; src[i] && o + 1 < dst_size; i++) {
+        char c = src[i];
+        if (c == '+') {
+            c = ' ';
+        } else if (c == '%' && src[i + 1] && src[i + 2]) {
+            const char hex[3] = { src[i + 1], src[i + 2], '\0' };
+            c = (char)strtol(hex, NULL, 16);
+            i += 2;
+        }
+        dst[o++] = c;
+    }
+    dst[o] = '\0';
+}
+
+/* Escapes the SSID before echoing it back into the confirmation page. Cheap
+ * insurance: the device is on the user's own desk and the page is torn down
+ * within a second, but there is no reason to trust bytes from an HTTP body. */
+static void html_escape(char *dst, size_t dst_size, const char *src)
+{
+    size_t o = 0;
+    for (size_t i = 0; src[i] && o + 6 < dst_size; i++) {
+        switch (src[i]) {
+        case '<':  o += snprintf(dst + o, dst_size - o, "&lt;");   break;
+        case '>':  o += snprintf(dst + o, dst_size - o, "&gt;");   break;
+        case '&':  o += snprintf(dst + o, dst_size - o, "&amp;");  break;
+        case '"':  o += snprintf(dst + o, dst_size - o, "&quot;"); break;
+        default:   dst[o++] = src[i]; dst[o] = '\0';               break;
+        }
+    }
+}
+
+static esp_err_t softap_get_handler(httpd_req_t *req)
+{
+    static const char PAGE[] =
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>deskos WiFi setup</title></head>"
+        "<body style=\"font-family:sans-serif;max-width:360px;margin:40px auto;padding:0 16px\">"
+        "<h2>deskos WiFi setup</h2>"
+        "<form method=\"POST\" action=\"/save\">"
+        "<label>Network name (SSID)<br>"
+        "<input name=\"ssid\" maxlength=\"32\" required style=\"width:100%;padding:8px;margin:8px 0\">"
+        "</label><br>"
+        "<label>Password<br>"
+        "<input name=\"password\" type=\"password\" maxlength=\"64\" style=\"width:100%;padding:8px;margin:8px 0\">"
+        "</label><br>"
+        "<button type=\"submit\" style=\"padding:10px 20px;margin-top:8px\">Connect</button>"
+        "</form></body></html>";
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, PAGE, HTTPD_RESP_USE_STRLEN);
+}
+
+static void softap_apply_cb(void *arg)
+{
+    (void)arg;
+    if (s_softap_httpd) {
+        httpd_stop(s_softap_httpd);
+        s_softap_httpd = NULL;
+    }
+    s_softap_active = false;
+
+    const esp_err_t err = persist_credentials(s_pending_ssid, s_pending_pass);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "failed to save credentials from setup: %s", esp_err_to_name(err));
+    }
+    snprintf(s_ssid, sizeof(s_ssid), "%s", s_pending_ssid);
+    snprintf(s_pass, sizeof(s_pass), "%s", s_pending_pass);
+    ESP_LOGI(TAG, "credentials updated (ssid '%s')", s_ssid);
+
+    /* Mode switch then config, same order as net_init() at boot — NOT
+     * followed by our own esp_wifi_connect(). Verified on hardware: calling
+     * connect() here as well as relying on the WIFI_EVENT_STA_START handler
+     * (which also calls it once s_ssid is set) raced the driver — logged
+     * "wifi:sta is connecting, return error" and then never associated,
+     * looping through backoff retries forever. One mode switch, one connect
+     * call, and STA_START is the one that gets to make it. */
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    wifi_config_t cfg;
+    fill_sta_config(&cfg);
+    esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    s_retry_ms = RETRY_MIN_MS;
+}
+
+static esp_err_t softap_post_handler(httpd_req_t *req)
+{
+    char body[256];
+    size_t want = (size_t)req->content_len;
+    if (want > sizeof(body) - 1) {
+        want = sizeof(body) - 1;
+    }
+    const int n = httpd_req_recv(req, body, want);
+    if (n <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    body[n] = '\0';
+
+    char raw_ssid[96] = "", raw_pass[192] = "";
+    httpd_query_key_value(body, "ssid", raw_ssid, sizeof(raw_ssid));
+    httpd_query_key_value(body, "password", raw_pass, sizeof(raw_pass));
+    url_decode(s_pending_ssid, sizeof(s_pending_ssid), raw_ssid);
+    url_decode(s_pending_pass, sizeof(s_pending_pass), raw_pass);
+
+    if (s_pending_ssid[0] == '\0') {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "text/html");
+        httpd_resp_sendstr(req, "<p>SSID is required. <a href=\"/\">Back</a></p>");
+        return ESP_OK;
+    }
+
+    char safe_ssid[3 * sizeof(s_pending_ssid)];
+    html_escape(safe_ssid, sizeof(safe_ssid), s_pending_ssid);
+
+    char page[384];
+    snprintf(page, sizeof(page),
+        "<!doctype html><html><body style=\"font-family:sans-serif;max-width:360px;"
+        "margin:40px auto;padding:0 16px\"><h2>Saved</h2>"
+        "<p>deskos is reconnecting to &quot;%s&quot; now. "
+        "This page's WiFi will disappear shortly.</p></body></html>", safe_ssid);
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_sendstr(req, page);
+
+    /* Apply after the response has had time to reach the phone — tearing the
+     * AP down from inside this handler would race the reply on its way out. */
+    esp_timer_start_once(s_softap_apply_timer, 800 * 1000);
+    return ESP_OK;
+}
+
+esp_err_t net_softap_start(void)
+{
+    if (s_softap_active) {
+        return ESP_OK;
+    }
+
+    if (!s_ap_netif) {
+        s_ap_netif = esp_netif_create_default_wifi_ap();
+        ESP_RETURN_ON_FALSE(s_ap_netif, ESP_FAIL, TAG, "ap netif");
+    }
+    if (!s_softap_apply_timer) {
+        const esp_timer_create_args_t targs = {
+            .callback = softap_apply_cb,
+            .name = "wifi_setup_apply",
+        };
+        ESP_RETURN_ON_ERROR(esp_timer_create(&targs, &s_softap_apply_timer), TAG, "timer create");
+    }
+
+    s_softap_active = true;
+    esp_wifi_disconnect();
+    ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_AP), TAG, "ap mode");
+
+    wifi_config_t ap_cfg;
+    memset(&ap_cfg, 0, sizeof(ap_cfg));
+    snprintf((char *)ap_cfg.ap.ssid, sizeof(ap_cfg.ap.ssid), "%s", NET_SOFTAP_SSID);
+    ap_cfg.ap.ssid_len = (uint8_t)strlen(NET_SOFTAP_SSID);
+    ap_cfg.ap.channel = 1;
+    ap_cfg.ap.authmode = WIFI_AUTH_OPEN;   /* short-lived, user-triggered — see CLAUDE.md */
+    ap_cfg.ap.max_connection = 2;
+    ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg), TAG, "ap config");
+
+    httpd_config_t http_cfg = HTTPD_DEFAULT_CONFIG();
+    http_cfg.lru_purge_enable = true;
+    const esp_err_t err = httpd_start(&s_softap_httpd, &http_cfg);
+    if (err != ESP_OK) {
+        net_softap_stop();
+        return err;
+    }
+
+    static const httpd_uri_t get_uri  = { .uri = "/",     .method = HTTP_GET,  .handler = softap_get_handler };
+    static const httpd_uri_t post_uri = { .uri = "/save", .method = HTTP_POST, .handler = softap_post_handler };
+    httpd_register_uri_handler(s_softap_httpd, &get_uri);
+    httpd_register_uri_handler(s_softap_httpd, &post_uri);
+
+    set_state(NET_SOFTAP);
+    ESP_LOGI(TAG, "setup AP up: ssid '%s', %s", NET_SOFTAP_SSID, NET_SOFTAP_URL);
+    return ESP_OK;
+}
+
+void net_softap_stop(void)
+{
+    if (!s_softap_active) {
+        return;
+    }
+    s_softap_active = false;
+
+    if (s_softap_apply_timer) {
+        esp_timer_stop(s_softap_apply_timer);
+    }
+    if (s_softap_httpd) {
+        httpd_stop(s_softap_httpd);
+        s_softap_httpd = NULL;
+    }
+
+    const bool have_creds = load_credentials();
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    if (have_creds) {
+        /* No explicit esp_wifi_connect() here — see softap_apply_cb() for why
+         * that raced WIFI_EVENT_STA_START's own connect() and reliably failed
+         * to associate. The mode switch above is enough to trigger it once. */
+        wifi_config_t cfg;
+        fill_sta_config(&cfg);
+        esp_wifi_set_config(WIFI_IF_STA, &cfg);
+        s_retry_ms = RETRY_MIN_MS;
+    } else {
+        set_state(NET_DOWN);
+    }
+    ESP_LOGI(TAG, "setup AP stopped, resuming station mode");
 }
 
 /* ------------------------------------------------------------------ timezone */
@@ -207,6 +510,11 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         break;
 
     case WIFI_EVENT_STA_DISCONNECTED:
+        if (s_softap_active) {
+            /* Expected: net_softap_start() just disconnected STA on purpose to
+             * switch to AP mode. Reconnecting here would fight the setup flow. */
+            break;
+        }
         set_state(NET_CONNECTING);
         /* Exponential backoff so a missing access point does not spin the radio. */
         xTaskCreate(retry_task, "wifi_retry", 2048, NULL, 3, NULL);

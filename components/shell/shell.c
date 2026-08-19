@@ -108,7 +108,7 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 static void status_refresh(void)
 {
     static const char *backends[] = { "gpio", "touch", "inject" };
-    static const char *nets[]     = { "--", "..", "ok" };
+    static const char *nets[]     = { "--", "..", "ok", "ap" };
 
     if (!s_status) {
         return;

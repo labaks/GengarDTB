@@ -42,8 +42,17 @@ static lv_obj_t   *s_screen;
 static lv_obj_t   *s_list;
 static lv_obj_t   *s_brightness_btn;
 static lv_obj_t   *s_tz_btn;
+static lv_obj_t   *s_wifi_btn;
 static lv_obj_t   *s_heap_label;
 static lv_timer_t *s_refresh_timer;
+
+/* WiFi setup sub-panel — swapped in over the list, torn down on cancel, on a
+ * result settling, or on settings_close() (the system "home" shortcut can
+ * fire mid-setup and must not strand the device in AP mode). */
+static lv_obj_t   *s_wifi_panel;
+static lv_obj_t   *s_wifi_status_label;
+static lv_timer_t *s_wifi_timer;
+static uint8_t     s_wifi_settle_ticks;
 
 /* ---------------------------------------------------------------- pinned set */
 
@@ -196,6 +205,13 @@ static void pin_clicked(lv_event_t *e)
     pin_row_set_text(lv_event_get_target(e), app);
 }
 
+static void wifi_label_update(void);   /* defined below, in the WiFi setup section */
+
+/* Also keeps the WiFi row live: net_state() can change in the background
+ * (setup finishing, or just the normal reconnect backoff) while this screen
+ * sits open and idle. Without this the row could freeze on "connecting" —
+ * seen on hardware right after a SoftAP setup that settled to NET_UP a beat
+ * after the setup panel had already closed and stopped watching it. */
 static void refresh_tick(lv_timer_t *timer)
 {
     (void)timer;
@@ -203,6 +219,120 @@ static void refresh_tick(lv_timer_t *timer)
     snprintf(buf, sizeof(buf), "Free heap: %lu KB",
              (unsigned long)(esp_get_free_heap_size() / 1024));
     lv_label_set_text(s_heap_label, buf);
+    wifi_label_update();
+}
+
+/* ---------------------------------------------------------------- WiFi setup */
+
+static void wifi_label_update(void)
+{
+    char ssid[33], line[64];
+    if (net_get_ssid(ssid, sizeof(ssid))) {
+        snprintf(line, sizeof(line), "WiFi: %s (%s)", ssid,
+                 net_state() == NET_UP ? "connected" : "connecting");
+    } else {
+        snprintf(line, sizeof(line), "WiFi: not configured (tap to set up)");
+    }
+    lv_list_set_button_text(s_list, s_wifi_btn, line);
+}
+
+static void wifi_setup_close(bool user_cancelled)
+{
+    if (!s_wifi_panel) {
+        return;
+    }
+    if (s_wifi_timer) {
+        lv_timer_delete(s_wifi_timer);
+        s_wifi_timer = NULL;
+    }
+    if (user_cancelled) {
+        net_softap_stop();
+    }
+    lv_obj_delete(s_wifi_panel);
+    s_wifi_panel = NULL;
+    s_wifi_status_label = NULL;
+    lv_obj_remove_flag(s_list, LV_OBJ_FLAG_HIDDEN);
+    wifi_label_update();
+}
+
+/* Polls net_state() rather than reacting to net_on_state_change(): that
+ * callback is already claimed by shell.c for the status bar, and one more
+ * subscriber would mean unsubscribing correctly on every close path. A
+ * 500 ms poll is plenty responsive for a screen a human is watching. */
+static void wifi_setup_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    const net_state_t st = net_state();
+    const char *msg;
+    switch (st) {
+    case NET_SOFTAP:     msg = "Waiting for the form to be submitted..."; break;
+    case NET_CONNECTING: msg = "Saved. Reconnecting...";                  break;
+    case NET_UP:         msg = "Connected!";                              break;
+    default:             msg = "Could not connect — check the password."; break;
+    }
+    lv_label_set_text(s_wifi_status_label, msg);
+
+    if (st == NET_SOFTAP) {
+        s_wifi_settle_ticks = 0;
+        return;
+    }
+    /* Setup ended on its own (form submitted and applied). Let the result
+     * message sit on screen for a beat before returning to the list. */
+    if (++s_wifi_settle_ticks >= 3) {
+        wifi_setup_close(false);
+    }
+}
+
+static void wifi_cancel_clicked(lv_event_t *e)
+{
+    (void)e;
+    wifi_setup_close(true);
+}
+
+static void wifi_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (s_wifi_panel) {
+        return;
+    }
+    if (net_softap_start() != ESP_OK) {
+        ESP_LOGW(TAG, "failed to start WiFi setup AP");
+        return;
+    }
+    s_wifi_settle_ticks = 0;
+
+    lv_obj_add_flag(s_list, LV_OBJ_FLAG_HIDDEN);
+
+    s_wifi_panel = lv_obj_create(s_screen);
+    lv_obj_set_size(s_wifi_panel, BSP_LCD_H_RES - 24, BSP_LCD_V_RES - 24);
+    lv_obj_center(s_wifi_panel);
+    lv_obj_set_flex_flow(s_wifi_panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(s_wifi_panel, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(s_wifi_panel, 10, LV_PART_MAIN);
+
+    lv_obj_t *title = lv_label_create(s_wifi_panel);
+    lv_label_set_text(title, "WiFi setup");
+
+    char instr[112];
+    snprintf(instr, sizeof(instr), "1. Connect a phone to WiFi \"%s\"\n2. Open %s in a browser",
+             NET_SOFTAP_SSID, NET_SOFTAP_URL);
+    lv_obj_t *instr_lbl = lv_label_create(s_wifi_panel);
+    lv_obj_set_width(instr_lbl, LV_PCT(100));
+    lv_label_set_long_mode(instr_lbl, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(instr_lbl, instr);
+
+    s_wifi_status_label = lv_label_create(s_wifi_panel);
+    lv_obj_set_width(s_wifi_status_label, LV_PCT(100));
+    lv_label_set_long_mode(s_wifi_status_label, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_wifi_status_label, "Waiting for the form to be submitted...");
+
+    lv_obj_t *cancel_btn = lv_button_create(s_wifi_panel);
+    lv_obj_t *cancel_lbl = lv_label_create(cancel_btn);
+    lv_label_set_text(cancel_lbl, "Cancel");
+    lv_obj_add_event_cb(cancel_btn, wifi_cancel_clicked, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(shell_input_group(), cancel_btn);
+
+    s_wifi_timer = lv_timer_create(wifi_setup_tick, 500, NULL);
 }
 
 /* ------------------------------------------------------------------- public */
@@ -234,16 +364,12 @@ esp_err_t settings_open(void)
     lv_group_add_obj(group, s_tz_btn);
     tz_label_update();
 
-    char ssid[33];
-    char line[64];
-    if (net_get_ssid(ssid, sizeof(ssid))) {
-        snprintf(line, sizeof(line), "WiFi: %s (%s)", ssid,
-                 net_state() == NET_UP ? "connected" : "connecting");
-    } else {
-        snprintf(line, sizeof(line), "WiFi: not configured");
-    }
-    lv_list_add_text(s_list, line);
+    s_wifi_btn = lv_list_add_button(s_list, NULL, "");
+    lv_obj_add_event_cb(s_wifi_btn, wifi_clicked, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(group, s_wifi_btn);
+    wifi_label_update();
 
+    char line[64];
     lv_list_add_text(s_list, bsp_sd_is_mounted() ? "SD card: mounted" : "SD card: not present");
 
     s_heap_label = lv_list_add_text(s_list, "");
@@ -274,6 +400,11 @@ void settings_close(void)
 {
     if (!s_screen) {
         return;
+    }
+    /* The system "home" shortcut can fire while setup is mid-flight — must not
+     * leave the device stuck in AP mode with no way back to STA. */
+    if (s_wifi_panel) {
+        wifi_setup_close(true);
     }
     if (s_refresh_timer) {
         lv_timer_delete(s_refresh_timer);

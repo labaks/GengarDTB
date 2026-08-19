@@ -19,9 +19,15 @@ typedef enum {
     NET_DOWN,          /* no credentials, or disconnected and waiting to retry */
     NET_CONNECTING,
     NET_UP,            /* associated and holding an IP */
+    NET_SOFTAP,        /* WiFi setup mode: STA is down, see net_softap_start() */
 } net_state_t;
 
 typedef void (*net_state_cb_t)(net_state_t state);
+
+/* AP name and the fixed address esp_netif hands out to it — for the setup
+ * screen to display, so the two ends of the flow don't drift apart. */
+#define NET_SOFTAP_SSID "deskos-setup"
+#define NET_SOFTAP_URL  "http://192.168.4.1"
 
 /* Starts the WiFi stack and connects if credentials are available. Returns OK
  * even with no credentials configured — that is a normal state that the shell
@@ -52,6 +58,15 @@ esp_err_t net_set_timezone(const char *tz);
 void net_get_timezone(char *out, size_t out_size);
 
 void net_on_state_change(net_state_cb_t cb);
+
+/* Brings up a temporary open SoftAP (NET_SOFTAP_SSID) with a one-page HTTP
+ * form at NET_SOFTAP_URL for typing an SSID/password from a phone or laptop —
+ * there is no keyboard on this device. STA disconnects while this is active.
+ * Submitting the form applies the new credentials and returns to station mode
+ * on its own; net_softap_stop() cancels and returns to the previous network.
+ * Safe to call net_softap_stop() when setup mode is not active. */
+esp_err_t net_softap_start(void);
+void      net_softap_stop(void);
 
 #ifdef __cplusplus
 }
