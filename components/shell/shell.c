@@ -39,6 +39,7 @@ static const char *TAG = "shell";
 
 static lv_display_t *s_disp;
 static lv_group_t   *s_group;
+static lv_indev_t   *s_keypad;
 static lv_obj_t     *s_status;
 static lv_obj_t     *s_list;
 static bool          s_host_connected;
@@ -159,6 +160,13 @@ void shell_set_host_connected(bool connected)
 lv_group_t *shell_input_group(void)
 {
     return s_group;
+}
+
+void shell_set_input_group(lv_group_t *group)
+{
+    if (s_keypad) {
+        lv_indev_set_group(s_keypad, group ? group : s_group);
+    }
 }
 
 /* ------------------------------------------------------------ system chords */
@@ -615,11 +623,11 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
     lv_indev_set_read_cb(touch, touch_read_cb);
     lv_indev_set_display(touch, s_disp);
 
-    lv_indev_t *keypad = lv_indev_create();
-    lv_indev_set_type(keypad, LV_INDEV_TYPE_KEYPAD);
-    lv_indev_set_read_cb(keypad, keypad_read_cb);
-    lv_indev_set_display(keypad, s_disp);
-    lv_indev_set_group(keypad, s_group);
+    s_keypad = lv_indev_create();
+    lv_indev_set_type(s_keypad, LV_INDEV_TYPE_KEYPAD);
+    lv_indev_set_read_cb(s_keypad, keypad_read_cb);
+    lv_indev_set_display(s_keypad, s_disp);
+    lv_indev_set_group(s_keypad, s_group);
 
     build_launcher();
     status_refresh();

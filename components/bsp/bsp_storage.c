@@ -1,5 +1,7 @@
 #include "bsp.h"
 
+#include <stdio.h>
+
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
 #include "esp_littlefs.h"
@@ -90,6 +92,25 @@ esp_err_t bsp_sd_mount(void)
 bool bsp_sd_is_mounted(void)
 {
     return s_sd_mounted;
+}
+
+void bsp_fs_usage(size_t *used_kb, size_t *total_kb)
+{
+    size_t total = 0, used = 0;
+    esp_littlefs_info(BSP_FS_PARTITION_LABEL, &total, &used);
+    *used_kb = used / 1024;
+    *total_kb = total / 1024;
+}
+
+void bsp_sd_info(char *name_out, size_t name_size, uint32_t *capacity_mb)
+{
+    if (!s_sd_mounted) {
+        name_out[0] = '\0';
+        *capacity_mb = 0;
+        return;
+    }
+    snprintf(name_out, name_size, "%s", s_card->cid.name);
+    *capacity_mb = (uint32_t)(((uint64_t)s_card->csd.capacity * s_card->csd.sector_size) / (1024 * 1024));
 }
 
 esp_err_t bsp_sd_unmount(void)

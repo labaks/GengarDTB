@@ -18,11 +18,17 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
  * while the PC is asleep. */
 void shell_set_host_connected(bool connected);
 
-/* The single LVGL input group that B1/B2/B1+B2 drive (PREV/NEXT/ENTER). Any
- * screen built outside shell.c (settings.c today) adds its focusable objects
- * here to get button navigation for free — same group, same key mapping,
- * regardless of which screen currently owns it. */
+/* The launcher's LVGL input group. Do not add another screen's objects here —
+ * they would stay registered (and get cycled through by PREV/NEXT) even after
+ * that screen is gone. A screen built outside shell.c (settings.c today) should
+ * keep its own group and swap it in via shell_set_input_group() instead. */
 lv_group_t *shell_input_group(void);
+
+/* Points the keypad indev (B1/B2/B1+B2 -> PREV/NEXT/ENTER) at a different
+ * group, so a screen with its own group gets the same button navigation for
+ * free without sharing objects with the launcher underneath it. Pass NULL to
+ * restore the launcher's own group. */
+void shell_set_input_group(lv_group_t *group);
 
 #ifdef __cplusplus
 }

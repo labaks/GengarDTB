@@ -115,6 +115,12 @@ esp_err_t bsp_sd_mount(void);
 bool      bsp_sd_is_mounted(void);
 esp_err_t bsp_sd_unmount(void);
 
+/* Snapshot of the internal LittleFS ("storage") partition usage, in KB. */
+void bsp_fs_usage(size_t *used_kb, size_t *total_kb);
+
+/* Card name + capacity, valid only while bsp_sd_is_mounted() is true. */
+void bsp_sd_info(char *name_out, size_t name_size, uint32_t *capacity_mb);
+
 /* ---------------- Indicators ---------------- */
 
 /* RGB LED is active-low on this board; this wrapper takes normal logic. */
