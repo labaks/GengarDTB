@@ -1,10 +1,13 @@
 /*
- * deskos shell — status bar + launcher, driven by the input layer.
+ * deskos shell — global toolbar + Home/Full list/Settings navigation, driven
+ * by the input layer. See docs/shell-navigation.md for the screen map this
+ * file implements.
  *
  * Input routing, in order:
  *   1. system chords are consumed here and never reach the app
- *   2. everything else is translated to LVGL keys and fed to the focus group,
- *      so widgets get normal LVGL navigation for free
+ *   2. on Home, B1/B2 cycle pinned widgets directly (no LVGL group involved)
+ *   3. everywhere else, keys are translated to LVGL PREV/NEXT/ENTER and fed
+ *      to whichever focus group currently owns the keypad indev
  *
  * NOTE ON TEXT: LVGL's bundled Montserrat fonts have no Cyrillic glyphs, so every
  * string here is Latin on purpose. Russian labels need a font generated with
@@ -13,6 +16,8 @@
 #include "shell.h"
 
 #include <stdio.h>
+#include <string.h>
+#include <time.h>
 
 #include "app_registry.h"
 #include "bsp.h"
@@ -38,11 +43,23 @@ static const char *TAG = "shell";
 #define BACKLIGHT_DEFAULT 55
 
 static lv_display_t *s_disp;
-static lv_group_t   *s_group;
+static lv_group_t   *s_group;      /* Full list's focus group (the base/default one) */
 static lv_indev_t   *s_keypad;
-static lv_obj_t     *s_status;
-static lv_obj_t     *s_list;
+static lv_obj_t     *s_status;     /* lives on lv_layer_top(), visible on every screen */
 static bool          s_host_connected;
+
+typedef enum {
+    SHELL_HOME,
+    SHELL_FULL_LIST,
+} shell_mode_t;
+
+static shell_mode_t     s_mode = SHELL_HOME;
+static lv_obj_t         *s_home_screen;
+static lv_obj_t         *s_home_label;
+static lv_obj_t         *s_full_list_screen;
+static const app_info_t *s_pinned[APP_REGISTRY_MAX];
+static size_t            s_pinned_count;
+static size_t            s_pinned_idx;
 
 /* Pending LVGL keys, filled by shell_tick and drained by the keypad read callback.
  * Two-phase: LVGL wants a PRESSED sample followed by a RELEASED one, while our
@@ -107,8 +124,15 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 
 /* ---------------------------------------------------------------- status bar */
 
-static void status_refresh(void)
+/* Lives on lv_layer_top(), a fixed overlay LVGL draws above whatever screen is
+ * currently active via lv_screen_load() — Home, Full list, Settings, or an
+ * open widget. Without this the bar used to be a plain child of the launcher
+ * screen and vanished every time anything else was shown (see
+ * docs/shell-navigation.md). Ticks every second so the clock keeps moving,
+ * not just on WiFi/host state changes. */
+static void status_refresh(lv_timer_t *timer)
 {
+    (void)timer;
     static const char *backends[] = { "gpio", "touch", "inject" };
     static const char *nets[]     = { "--", "..", "ok", "ap" };
 
@@ -116,8 +140,17 @@ static void status_refresh(void)
         return;
     }
 
-    char buf[80];
-    snprintf(buf, sizeof(buf), "%s | wifi %s | sd %s | pc %s",
+    char clock_buf[8] = "--:--";
+    if (net_time_valid()) {
+        const time_t now = time(NULL);
+        struct tm tm_local;
+        localtime_r(&now, &tm_local);
+        strftime(clock_buf, sizeof(clock_buf), "%H:%M", &tm_local);
+    }
+
+    char buf[96];
+    snprintf(buf, sizeof(buf), "%s | %s | wifi %s | sd %s | pc %s",
+             clock_buf,
              backends[input_get_backend()],
              nets[net_state()],
              bsp_sd_is_mounted() ? "ok" : "--",
@@ -130,7 +163,7 @@ static void on_net_state(net_state_t state)
 {
     (void)state;
     if (lvgl_port_lock(200)) {
-        status_refresh();
+        status_refresh(NULL);
         lvgl_port_unlock();
     }
 }
@@ -152,7 +185,7 @@ void shell_set_host_connected(bool connected)
     s_host_connected = connected;
 
     if (lvgl_port_lock(100)) {
-        status_refresh();
+        status_refresh(NULL);
         lvgl_port_unlock();
     }
 }
@@ -169,6 +202,151 @@ void shell_set_input_group(lv_group_t *group)
     }
 }
 
+/* ------------------------------------------------------------ Home / Full list */
+
+static void app_clicked(lv_event_t *e)
+{
+    const app_info_t *app = lv_event_get_user_data(e);
+
+    if (!app_registry_is_available(app, s_host_connected)) {
+        /* Degraded rather than hidden: the entry stays in the list so the user
+         * can see the widget exists, but opening it would show nothing useful. */
+        ESP_LOGW(TAG, "'%s' is unavailable right now", app->id);
+        return;
+    }
+
+    ESP_LOGI(TAG, "launching '%s' from %s", app->id, app->dir);
+    const esp_err_t err = widget_open(app);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "cannot open '%s': %s", app->id, esp_err_to_name(err));
+    }
+}
+
+static void settings_clicked(lv_event_t *e)
+{
+    (void)e;
+    ESP_LOGI(TAG, "opening settings");
+    const esp_err_t err = settings_open();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "cannot open settings: %s", esp_err_to_name(err));
+    }
+}
+
+/* Home: a fullscreen render of one pinned widget at a time (reuses
+ * widget_open() as-is — it does not care who opened it), or a static
+ * placeholder when nothing is pinned yet. B1/B2 cycle pinned widgets
+ * directly; there is no list to navigate, so this does not touch lv_group at
+ * all (see shell_tick). */
+static void show_home(void)
+{
+    s_mode = SHELL_HOME;
+    lv_screen_load(s_home_screen);   /* must be active before widget_open() below,
+                                       * so its own "previous screen" bookkeeping
+                                       * points back here rather than Full list. */
+
+    s_pinned_count = settings_pinned_apps(s_pinned, APP_REGISTRY_MAX);
+    if (s_pinned_idx >= s_pinned_count) {
+        s_pinned_idx = 0;
+    }
+
+    if (s_pinned_count == 0) {
+        lv_label_set_text(s_home_label, "No pinned widgets.\nOpen Full list to pin one.");
+        return;
+    }
+    lv_label_set_text(s_home_label, "");
+    widget_open(s_pinned[s_pinned_idx]);
+}
+
+static void home_step(int dir)
+{
+    if (s_pinned_count == 0) {
+        return;
+    }
+    s_pinned_idx = (size_t)(((int)s_pinned_idx + dir + (int)s_pinned_count) % (int)s_pinned_count);
+    widget_open(s_pinned[s_pinned_idx]);   /* closes whatever pinned widget was showing first */
+}
+
+static void show_full_list(void)
+{
+    if (widget_is_open()) {
+        widget_close();
+    }
+    s_mode = SHELL_FULL_LIST;
+    lv_screen_load(s_full_list_screen);
+}
+
+static void build_home_screen(void)
+{
+    s_home_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_home_screen, lv_color_hex(0x101418), LV_PART_MAIN);
+    lv_obj_remove_flag(s_home_screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_home_label = lv_label_create(s_home_screen);
+    lv_obj_set_style_text_color(s_home_label, lv_color_hex(0xC0C8D0), LV_PART_MAIN);
+    lv_label_set_long_mode(s_home_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_home_label, LV_PCT(80));
+    lv_obj_set_style_text_align(s_home_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_center(s_home_label);
+}
+
+/* A grid of tiles instead of the old vertical list — same primitives
+ * (lv_button + lv_label), just wrapped instead of stacked. No icons: there is
+ * no image asset pipeline yet (ROADMAP #28), so a tile is its app name. */
+static void build_full_list_screen(void)
+{
+    s_full_list_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_full_list_screen, lv_color_hex(0x101418), LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_full_list_screen, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_style_pad_all(s_full_list_screen, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(s_full_list_screen, SHELL_TOOLBAR_HEIGHT + 4, LV_PART_MAIN);   /* room for the toolbar */
+    lv_obj_set_style_pad_row(s_full_list_screen, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(s_full_list_screen, 8, LV_PART_MAIN);
+
+    const size_t n = app_registry_count();
+    if (n == 0) {
+        lv_obj_t *empty = lv_label_create(s_full_list_screen);
+        lv_label_set_text(empty,
+                          bsp_sd_is_mounted() ? "No apps in /sd/apps"
+                                              : "Insert microSD card");
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        const app_info_t *app = app_registry_get(i);
+
+        char label[64];
+        if (app_registry_is_available(app, s_host_connected)) {
+            snprintf(label, sizeof(label), "%s", app->name);
+        } else {
+            /* Degraded, not hidden: the user should see the widget exists and why
+             * it cannot run, rather than wondering where it went. */
+            snprintf(label, sizeof(label), "%s\n(unavailable)", app->name);
+        }
+
+        lv_obj_t *tile = lv_button_create(s_full_list_screen);
+        lv_obj_set_size(tile, 92, 64);
+        lv_obj_t *lbl = lv_label_create(tile);
+        lv_obj_set_width(lbl, LV_PCT(100));
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_label_set_text(lbl, label);
+        lv_obj_center(lbl);
+
+        lv_obj_add_event_cb(tile, app_clicked, LV_EVENT_CLICKED, (void *)app);
+        lv_group_add_obj(s_group, tile);
+    }
+
+    /* Settings is not from the registry — a fixed tile the shell always adds
+     * itself (see docs/shell-navigation.md). Always present, even with zero
+     * apps/no card, so it stays reachable in every state. */
+    lv_obj_t *settings_tile = lv_button_create(s_full_list_screen);
+    lv_obj_set_size(settings_tile, 92, 64);
+    lv_obj_t *settings_lbl = lv_label_create(settings_tile);
+    lv_label_set_text(settings_lbl, "Settings");
+    lv_obj_center(settings_lbl);
+    lv_obj_add_event_cb(settings_tile, settings_clicked, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(s_group, settings_tile);
+}
+
 /* ------------------------------------------------------------ system chords */
 
 /* The two layouts differ by more than one binding, so the mapping is chosen from
@@ -180,6 +358,13 @@ static bool three_buttons(void)
     return (input_get_present_mask() & INPUT_B3) != 0;
 }
 
+static bool is_enter(const input_event_t *ev)
+{
+    const bool click = ev->kind == INPUT_EV_CLICK;
+    return three_buttons() ? (ev->mask == INPUT_B3 && click)
+                            : (ev->mask == (INPUT_B1 | INPUT_B2) && click);
+}
+
 static void step_backlight(void)
 {
     uint8_t pct = bsp_backlight_get();
@@ -189,8 +374,19 @@ static void step_backlight(void)
     ESP_LOGI(TAG, "system: backlight %u%%", pct);
 }
 
+/* "Home" is always reachable and always lands on the same place — there is no
+ * back-stack (see docs/shell-navigation.md): a widget opened from Full list
+ * still returns to Home, not to Full list, same as a widget pinned to Home
+ * itself. */
 static void go_home(const char *why)
 {
+    /* A widget being open is NOT "elsewhere" by itself — Home shows one
+     * whenever something is pinned. Only Full list (browsing tiles, or
+     * drilled into a widget/Settings from there) counts. */
+    if (s_mode != SHELL_FULL_LIST) {
+        return;   /* already home, nothing to do */
+    }
+
     if (widget_is_open()) {
         ESP_LOGI(TAG, "system: home (%s), closing '%s'", why, widget_current()->id);
         widget_close();
@@ -199,6 +395,7 @@ static void go_home(const char *why)
         ESP_LOGI(TAG, "system: home (%s), closing settings", why);
         settings_close();
     }
+    show_home();
 }
 
 /* Returns true when the event was a system action and must not reach the app. */
@@ -217,6 +414,16 @@ static bool handle_system_chord(const input_event_t *ev)
         return true;
     }
 
+    /* Home -> Full list, the one system-level action that is NOT unconditional:
+     * it only means something while sitting on Home. Elsewhere the same chord
+     * is ENTER (a Full list tile) or an app's own manifest binding — "system
+     * always wins" only applies to chords the system actually claims right now. */
+    if (s_mode == SHELL_HOME && !settings_is_open() && is_enter(ev)) {
+        ESP_LOGI(TAG, "system: home -> full list");
+        show_full_list();
+        return true;
+    }
+
     if (three_buttons()) {
         if (ev->mask == (INPUT_B1 | INPUT_B3) && click) {
             go_home("chord");
@@ -232,6 +439,7 @@ static bool handle_system_chord(const input_event_t *ev)
             ESP_LOGW(TAG, "system: force return to launcher");
             widget_close();
             settings_close();
+            show_home();
             return true;
         }
     } else {
@@ -243,6 +451,7 @@ static bool handle_system_chord(const input_event_t *ev)
             ESP_LOGW(TAG, "system: force return to launcher");
             widget_close();
             settings_close();
+            show_home();
             return true;
         }
     }
@@ -288,8 +497,33 @@ static void shell_tick(lv_timer_t *timer)
         ESP_LOGI(TAG, "input: %s", input_event_str(&ev));
 
         if (handle_system_chord(&ev)) {
-            status_refresh();
+            status_refresh(NULL);
             continue;
+        }
+
+        /* Home has no list to navigate — B1/B2 step through pinned widgets
+         * directly instead of driving a focus group. Only reachable here when
+         * is_enter() above did not already consume the event as "go to Full
+         * list", so a pinned widget's own manifest binding on the same chord
+         * (e.g. weather's refresh) never fires while it is showing on Home —
+         * system navigation wins, same rule as everywhere else.
+         *
+         * CLICK only, not HOLD_REPEAT: found on hardware that holding B1 (for
+         * the "go home" long-press) or B2 (for brightness) keeps generating
+         * repeat events for that same bare mask for as long as the button
+         * stays down. Reacting to those here span-cycled through pinned
+         * widgets (each with its own HTTP refetch) for the entire duration of
+         * an unrelated long-press. Plain click has no such follow-on. */
+        if (s_mode == SHELL_HOME) {
+            const bool click = ev.kind == INPUT_EV_CLICK;
+            if (ev.mask == INPUT_B1 && click) {
+                home_step(-1);
+                continue;
+            }
+            if (ev.mask == INPUT_B2 && click) {
+                home_step(+1);
+                continue;
+            }
         }
 
         /* System chords always get first refusal (above) — a manifest
@@ -307,83 +541,6 @@ static void shell_tick(lv_timer_t *timer)
             key_push(key);
         }
     }
-}
-
-/* ------------------------------------------------------------------ launcher */
-
-static void app_clicked(lv_event_t *e)
-{
-    const app_info_t *app = lv_event_get_user_data(e);
-
-    if (!app_registry_is_available(app, s_host_connected)) {
-        /* Degraded rather than hidden: the entry stays in the list so the user
-         * can see the widget exists, but opening it would show nothing useful. */
-        ESP_LOGW(TAG, "'%s' is unavailable right now", app->id);
-        return;
-    }
-
-    ESP_LOGI(TAG, "launching '%s' from %s", app->id, app->dir);
-    const esp_err_t err = widget_open(app);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "cannot open '%s': %s", app->id, esp_err_to_name(err));
-    }
-}
-
-static void settings_clicked(lv_event_t *e)
-{
-    (void)e;
-    ESP_LOGI(TAG, "opening settings");
-    const esp_err_t err = settings_open();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "cannot open settings: %s", esp_err_to_name(err));
-    }
-}
-
-static void build_launcher(void)
-{
-    lv_obj_t *scr = lv_screen_active();
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x101418), LV_PART_MAIN);
-
-    s_status = lv_label_create(scr);
-    lv_obj_set_style_text_color(s_status, lv_color_hex(0x7f8c8d), LV_PART_MAIN);
-    lv_obj_align(s_status, LV_ALIGN_TOP_LEFT, 6, 4);
-
-    s_list = lv_list_create(scr);
-    lv_obj_set_size(s_list, BSP_LCD_H_RES - 12, BSP_LCD_V_RES - 34);
-    lv_obj_align(s_list, LV_ALIGN_BOTTOM_MID, 0, -6);
-
-    const size_t n = app_registry_count();
-    if (n == 0) {
-        lv_obj_t *empty = lv_label_create(s_list);
-        lv_label_set_text(empty,
-                          bsp_sd_is_mounted() ? "No apps in /sd/apps"
-                                              : "Insert microSD card");
-    }
-
-    for (size_t i = 0; i < n; i++) {
-        const app_info_t *app = app_registry_get(i);
-
-        char label[64];
-        if (app_registry_is_available(app, s_host_connected)) {
-            snprintf(label, sizeof(label), "%s", app->name);
-        } else {
-            /* Degraded, not hidden: the user should see the widget exists and why
-             * it cannot run, rather than wondering where it went. */
-            snprintf(label, sizeof(label), "%s  (unavailable)", app->name);
-        }
-
-        lv_obj_t *btn = lv_list_add_button(s_list, NULL, label);
-        lv_obj_add_event_cb(btn, app_clicked, LV_EVENT_CLICKED, (void *)app);
-        lv_group_add_obj(s_group, btn);
-    }
-
-    /* Settings is not from the registry — a fixed entry the shell always
-     * adds itself, same list, no separate system combo (see
-     * docs/shell-navigation.md). Always present, even with zero apps/no card,
-     * so it stays reachable in every state. */
-    lv_obj_t *settings_btn = lv_list_add_button(s_list, NULL, "Settings");
-    lv_obj_add_event_cb(settings_btn, settings_clicked, LV_EVENT_CLICKED, NULL);
-    lv_group_add_obj(s_group, settings_btn);
 }
 
 /* ------------------------------------------------------- touch calibration */
@@ -471,10 +628,11 @@ static void cal_wait_for_press(uint16_t *out_rx, uint16_t *out_ry)
     }
 }
 
-/* Runs before indevs/launcher exist, so it polls the raw touch reading
+/* Runs before indevs/screens exist, so it polls the raw touch reading
  * directly (see bsp.h) rather than going through an LVGL indev. Targets are
- * added to whatever screen is already active and removed again afterwards —
- * build_launcher() draws onto that same screen right after this returns. */
+ * added to whatever screen is already active (LVGL's own initial default
+ * screen) and removed again afterwards — that screen is then abandoned once
+ * show_home() loads the real Home screen right after this returns. */
 static void run_touch_calibration(void)
 {
     static const cal_point_t targets[4] = {
@@ -629,10 +787,35 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
     lv_indev_set_display(s_keypad, s_disp);
     lv_indev_set_group(s_keypad, s_group);
 
-    build_launcher();
-    status_refresh();
+    /* Global toolbar, on top of every screen (see status_refresh()'s own
+     * comment). An opaque bar, not just floating text — without a background
+     * of its own the status text visually merged with whatever a widget or
+     * screen drew directly underneath it (found on hardware: clock/weather's
+     * own header text sat right where the toolbar text was). Not part of any
+     * focus group and not clickable — a status readout, never an input target. */
+    lv_obj_t *toolbar = lv_obj_create(lv_layer_top());
+    lv_obj_remove_flag(toolbar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(toolbar, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_pos(toolbar, 0, 0);
+    lv_obj_set_size(toolbar, BSP_LCD_H_RES, SHELL_TOOLBAR_HEIGHT);
+    lv_obj_set_style_bg_color(toolbar, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(toolbar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(toolbar, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(toolbar, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(toolbar, 0, LV_PART_MAIN);
+
+    s_status = lv_label_create(toolbar);
+    lv_obj_set_style_text_color(s_status, lv_color_hex(0x9aa7b0), LV_PART_MAIN);
+    lv_obj_align(s_status, LV_ALIGN_LEFT_MID, 6, 0);
+    lv_obj_remove_flag(s_status, LV_OBJ_FLAG_CLICKABLE);
+
+    build_home_screen();
+    build_full_list_screen();
+    show_home();
+    status_refresh(NULL);
 
     lv_timer_create(shell_tick, 10, NULL);
+    lv_timer_create(status_refresh, 1000, NULL);
     net_on_state_change(on_net_state);
     host_on_state_change(on_host_state);
 

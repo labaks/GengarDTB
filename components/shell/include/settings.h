@@ -7,6 +7,8 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
+#include "app_registry.h"
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -27,6 +29,10 @@ bool settings_is_open(void);
  * is safe to call whether or not the settings screen is currently open —
  * Home (ROADMAP #19, not built yet) will call this to pick what to show. */
 bool settings_app_is_pinned(const char *app_id);
+
+/* Pinned apps, in the order they were pinned (not registry order), for Home
+ * to cycle through. Returns the count written into out (capped at max). */
+size_t settings_pinned_apps(const app_info_t **out, size_t max);
 
 #ifdef __cplusplus
 }

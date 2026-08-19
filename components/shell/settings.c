@@ -144,6 +144,25 @@ bool settings_app_is_pinned(const char *app_id)
     return false;
 }
 
+size_t settings_pinned_apps(const app_info_t **out, size_t max)
+{
+    char ids[PINNED_MAX_APPS][24];
+    const int n = pinned_read_ids(ids, PINNED_MAX_APPS);
+    const size_t total = app_registry_count();
+
+    size_t count = 0;
+    for (int i = 0; i < n && count < max; i++) {
+        for (size_t j = 0; j < total; j++) {
+            const app_info_t *app = app_registry_get(j);
+            if (strcmp(app->id, ids[i]) == 0) {
+                out[count++] = app;
+                break;
+            }
+        }
+    }
+    return count;
+}
+
 static void pinned_toggle(const char *app_id)
 {
     char ids[PINNED_MAX_APPS][24];
@@ -335,8 +354,8 @@ static void wifi_clicked(lv_event_t *e)
     lv_obj_add_flag(s_list, LV_OBJ_FLAG_HIDDEN);
 
     s_wifi_panel = lv_obj_create(s_screen);
-    lv_obj_set_size(s_wifi_panel, BSP_LCD_H_RES - 24, BSP_LCD_V_RES - 24);
-    lv_obj_center(s_wifi_panel);
+    lv_obj_set_size(s_wifi_panel, BSP_LCD_H_RES - 24, BSP_LCD_V_RES - 24 - SHELL_TOOLBAR_HEIGHT);
+    lv_obj_align(s_wifi_panel, LV_ALIGN_BOTTOM_MID, 0, -6);
     lv_obj_set_flex_flow(s_wifi_panel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(s_wifi_panel, 12, LV_PART_MAIN);
     lv_obj_set_style_pad_row(s_wifi_panel, 10, LV_PART_MAIN);
@@ -596,8 +615,8 @@ esp_err_t settings_open(void)
     lv_obj_remove_flag(s_screen, LV_OBJ_FLAG_SCROLLABLE);
 
     s_list = lv_list_create(s_screen);
-    lv_obj_set_size(s_list, BSP_LCD_H_RES - 12, BSP_LCD_V_RES - 12);
-    lv_obj_center(s_list);
+    lv_obj_set_size(s_list, BSP_LCD_H_RES - 12, BSP_LCD_V_RES - 12 - SHELL_TOOLBAR_HEIGHT);
+    lv_obj_align(s_list, LV_ALIGN_BOTTOM_MID, 0, -6);
 
     if (!s_group) {
         s_group = lv_group_create();
