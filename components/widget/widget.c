@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "host.h"
 #include "lvgl.h"
 #include "net.h"
 
@@ -82,6 +83,15 @@ static cJSON            *s_combined;   /* persists across fetches; each source
                                          * updates its own slice of it */
 static bool              s_showing_cache;   /* true until the first live fetch lands */
 static time_t            s_cache_ts;        /* epoch when the on-disk cache was written */
+
+/* {"src":"host","topic":"cpu"} — always named (unlike http, "topic" is not
+ * optional), pushed by the shared host-agent client (host.c, ROADMAP #13)
+ * rather than polled. Not disk-cached: unlike an HTTP response, there is
+ * nothing meaningful to show from a previous session once the agent is gone. */
+#define WIDGET_MAX_HOST_TOPICS 4
+static char               s_host_topics[WIDGET_MAX_HOST_TOPICS][24];
+static size_t             s_nhosttopics;
+
 static bool              s_has_clock;
 static TaskHandle_t      s_task;
 static volatile bool     s_stop;
@@ -353,6 +363,16 @@ static void parse_line(const char *line, int line_no)
          * so a minute rollover shows up promptly instead of waiting out the
          * http floor above. */
         s_has_clock = true;
+    } else if (src && strcmp(src, "host") == 0) {
+        const char *topic = cJSON_GetStringValue(cJSON_GetObjectItem(root, "topic"));
+        if (!topic || !*topic) {
+            report_error(line_no, "host source missing 'topic'");
+        } else if (s_nhosttopics >= WIDGET_MAX_HOST_TOPICS) {
+            report_error(line_no, "too many host topics (max %d)", WIDGET_MAX_HOST_TOPICS);
+        } else {
+            snprintf(s_host_topics[s_nhosttopics], sizeof(s_host_topics[0]), "%s", topic);
+            s_nhosttopics++;
+        }
     } else {
         add_view(root, line_no);
     }
@@ -412,24 +432,33 @@ static void cache_path(char *out, size_t out_size)
     snprintf(out, out_size, "%s/%s", s_app->dir, WIDGET_CACHE_NAME);
 }
 
-/* Called right after a successful fetch, never while holding the LVGL lock —
- * flash writes are slow enough that the UI would visibly stutter otherwise. */
-static void cache_save(void)
+/* Serializes s_combined — call this while it is safe to read (i.e. under the
+ * same lock apply_data() needs, now that host.c's data callback can also be
+ * touching s_combined on its own task). Just memory + CPU, no I/O, so holding
+ * the LVGL lock for it is cheap. */
+static char *build_cache_text(void)
 {
     if (!s_combined) {
-        return;
+        return NULL;
     }
-
     cJSON *wrapper = cJSON_CreateObject();
     cJSON_AddNumberToObject(wrapper, "ts", (double)time(NULL));
     cJSON_AddItemToObject(wrapper, "data", cJSON_Duplicate(s_combined, true));
 
     char *text = cJSON_PrintUnformatted(wrapper);
     cJSON_Delete(wrapper);
+    return text;
+}
+
+/* The actual flash write — deliberately separate from build_cache_text() so
+ * callers can serialize under lock and write unlocked. Flash writes are slow
+ * enough that doing this while holding the LVGL lock would visibly stutter
+ * the UI. */
+static void write_cache_file(const char *text)
+{
     if (!text) {
         return;
     }
-
     char path[192];
     cache_path(path, sizeof(path));
     FILE *f = fopen(path, "wb");
@@ -438,7 +467,6 @@ static void cache_save(void)
         fclose(f);
         ESP_LOGI(TAG, "cache written: %s (%u bytes)", path, (unsigned)strlen(text));
     }
-    cJSON_free(text);
 }
 
 /* Loads the last good response(s) from a previous session, if any, so the
@@ -538,33 +566,55 @@ static void merge_source(const char *name, cJSON *fetched)
     cJSON_Delete(fetched);   /* now an empty shell */
 }
 
-/* One tick per second, checking every source's own period independently —
- * REFRESH_MIN_S floors each at 30s, so per-source overhead of a 1s poll is
+/* Decides what the corner says, in priority order: a stalled http source
+ * outranks a stalled host connection (network trouble is the more actionable
+ * fact), which outranks "everything's fine". Must be called under the LVGL
+ * lock, same as apply_data(). */
+static void update_status(bool fetched_any, bool all_ok)
+{
+    if (s_nsources > 0 && net_state() != NET_UP) {
+        if (s_showing_cache) {
+            /* Recomputed every call: the age keeps advancing (and the clock
+             * may only just now have synced) while the network stays down. */
+            char age[32];
+            format_cache_age(age, sizeof(age), s_cache_ts);
+            set_status(age);
+        } else {
+            set_status("waiting for network");
+        }
+        return;
+    }
+    if (s_nhosttopics > 0 && host_state() != HOST_UP) {
+        set_status("waiting for pc");
+        return;
+    }
+    set_status(fetched_any && !all_ok ? "stale" : "");
+}
+
+/* One tick per second, checking every http source's own period independently
+ * — REFRESH_MIN_S floors each at 30s, so per-source overhead of a 1s poll is
  * negligible. Sleeping in 200ms slices (not one vTaskDelay(1000)) keeps
- * widget_close() from waiting up to a second for this task to notice s_stop. */
+ * widget_close() from waiting up to a second for this task to notice s_stop.
+ * Host topics need no polling here at all — host.c pushes them straight into
+ * widget_host_data_cb() on its own; this task only keeps their status text
+ * (and any http sources') current. */
 static void refresh_task(void *arg)
 {
     (void)arg;
 
     while (!s_stop) {
-        if (net_state() != NET_UP) {
-            if (lvgl_port_lock(200)) {
-                if (s_showing_cache) {
-                    /* Recomputed every tick: the age keeps advancing (and the
-                     * clock may only just now have synced) while the network
-                     * stays down. */
-                    char age[32];
-                    format_cache_age(age, sizeof(age), s_cache_ts);
-                    set_status(age);
-                } else {
-                    set_status("waiting for network");
-                }
-                lvgl_port_unlock();
-            }
-        } else {
-            bool fetched_any = false;
-            bool any_success = false;
-            bool all_ok = true;
+        bool fetched_any = false;
+        bool any_success = false;
+        bool all_ok = true;
+
+        if (s_nsources > 0 && net_state() == NET_UP) {
+            /* Fetch (slow, network-bound) before taking the lock; merge
+             * (fast, in-memory) after. s_combined can also be written by
+             * host.c's data callback on its own task, so mutating it has to
+             * happen under the same lock apply_data() already needs — not
+             * interleaved with the network round-trip. */
+            cJSON *fetched[WIDGET_MAX_SOURCES] = { 0 };
+            bool   ok[WIDGET_MAX_SOURCES] = { 0 };
 
             for (size_t i = 0; i < s_nsources; i++) {
                 wsource_t *s = &s_sources[i];
@@ -574,35 +624,44 @@ static void refresh_task(void *arg)
                 s->elapsed_s = 0;
                 fetched_any = true;
 
-                cJSON *root = NULL;
-                const esp_err_t err = datasource_fetch_json(s->url, &root);
-                if (err == ESP_OK && root) {
-                    merge_source(s->name, root);
+                const esp_err_t err = datasource_fetch_json(s->url, &fetched[i]);
+                if (err == ESP_OK && fetched[i]) {
+                    ok[i] = true;
                     any_success = true;
                 } else {
                     /* Keep the last values on screen and say they are stale.
                      * Blanking the widget on a transient network hiccup is
                      * strictly worse than showing slightly old numbers. */
                     all_ok = false;
-                    if (root) {
-                        cJSON_Delete(root);
+                    if (fetched[i]) {
+                        cJSON_Delete(fetched[i]);
                     }
                 }
             }
 
-            if (any_success) {
-                /* Live data has landed — the on-disk cache no longer has
-                 * anything to add, even if a later fetch fails and the
-                 * status goes back to "stale" rather than "cached Nh ago". */
-                cache_save();
-                s_showing_cache = false;
-            }
-
+            char *cache_text = NULL;
             if (fetched_any && lvgl_port_lock(500)) {
+                for (size_t i = 0; i < s_nsources; i++) {
+                    if (ok[i]) {
+                        merge_source(s_sources[i].name, fetched[i]);
+                    }
+                }
+                if (any_success) {
+                    cache_text = build_cache_text();
+                    s_showing_cache = false;
+                }
                 apply_data(s_combined);
-                set_status(all_ok ? "" : "stale");
+                update_status(fetched_any, all_ok);
                 lvgl_port_unlock();
             }
+            /* Flash write stays outside the lock — see write_cache_file(). */
+            write_cache_file(cache_text);
+            cJSON_free(cache_text);
+        }
+
+        if (!fetched_any && lvgl_port_lock(200)) {
+            update_status(false, true);
+            lvgl_port_unlock();
         }
 
         for (uint32_t i = 0; i < 5 && !s_stop; i++) {
@@ -615,6 +674,19 @@ static void refresh_task(void *arg)
 
     s_task = NULL;
     vTaskDelete(NULL);
+}
+
+/* Pushed by host.c on its own task whenever a subscribed topic updates.
+ * `value` is a borrowed pointer valid only for this call, so it is duplicated
+ * before merge_source() takes ownership. */
+static void widget_host_data_cb(const char *topic, const cJSON *value)
+{
+    if (!lvgl_port_lock(200)) {
+        return;
+    }
+    merge_source(topic, cJSON_Duplicate(value, true));
+    apply_data(s_combined);
+    lvgl_port_unlock();
 }
 
 /* Local source: no network, no fetch — just the device's own clock, which
@@ -709,6 +781,7 @@ esp_err_t widget_open(const app_info_t *app)
     s_nsources = 0;
     s_showing_cache = false;
     s_cache_ts = 0;
+    s_nhosttopics = 0;
     s_has_clock = false;
     memset(s_objs, 0, sizeof(s_objs));
     s_err_buf[0] = '\0';
@@ -781,14 +854,15 @@ esp_err_t widget_open(const app_info_t *app)
     }
 
     lv_screen_load(s_screen);
-    ESP_LOGI(TAG, "opened '%s': %u view(s), %u source(s), %d parse issue(s)%s", app->id,
-             (unsigned)s_nobjs, (unsigned)s_nsources, s_err_count,
-             s_has_clock ? ", clock source" : (s_nsources ? "" : ", static"));
+    ESP_LOGI(TAG, "opened '%s': %u view(s), %u source(s), %u host topic(s), %d parse issue(s)%s",
+             app->id, (unsigned)s_nobjs, (unsigned)s_nsources, (unsigned)s_nhosttopics, s_err_count,
+             s_has_clock ? ", clock source" : (s_nsources || s_nhosttopics ? "" : ", static"));
 
-    /* Clock and http are still alternatives, not layered: clock is the one
-     * source that does not depend on the network, so a manifest declaring
-     * both gets the clock. Multiple *http* sources in the same widget (this
-     * task, ROADMAP #10) are fine — see merge_source(). */
+    /* Clock is still an alternative to everything else, not layered: it is
+     * the one source that does not depend on the network at all, so a
+     * manifest declaring it alongside http/host sources gets the clock.
+     * Multiple http sources (ROADMAP #10) and http + host together are fine
+     * — both just feed merge_source() into the same s_combined. */
     if (s_has_clock) {
         s_stop = false;
         if (xTaskCreatePinnedToCore(clock_task, "wdg_clock", 4096, NULL, 3, &s_task, 1)
@@ -796,13 +870,13 @@ esp_err_t widget_open(const app_info_t *app)
             ESP_LOGE(TAG, "cannot start clock task");
             s_task = NULL;
         }
-    } else if (s_nsources > 0) {
+    } else if (s_nsources > 0 || s_nhosttopics > 0) {
         /* Show yesterday's numbers immediately rather than sit blank until
          * the first fetch lands — the device must stay useful with the PC
          * asleep or the router down (see CLAUDE.md's autonomy rule). Without
          * a cache the corner would otherwise sit blank for up to the ~10s
          * TLS connect timeout, indistinguishable from "nothing to report". */
-        if (cache_load()) {
+        if (s_nsources > 0 && cache_load()) {
             apply_data(s_combined);
             s_showing_cache = true;
             char age[32];
@@ -811,6 +885,16 @@ esp_err_t widget_open(const app_info_t *app)
         } else {
             set_status("loading");
         }
+
+        if (s_nhosttopics > 0) {
+            const char *topics[WIDGET_MAX_HOST_TOPICS];
+            for (size_t i = 0; i < s_nhosttopics; i++) {
+                topics[i] = s_host_topics[i];
+            }
+            host_on_data(widget_host_data_cb);
+            host_set_topics(topics, s_nhosttopics);
+        }
+
         s_stop = false;
         if (xTaskCreatePinnedToCore(refresh_task, "wdg_refresh", 6144, NULL, 3, &s_task, 0)
                 != pdPASS) {
@@ -823,6 +907,16 @@ esp_err_t widget_open(const app_info_t *app)
 
 void widget_close(void)
 {
+    if (s_nhosttopics > 0) {
+        /* Stop future pushes before anything else is torn down. A push
+         * already in flight when this runs may still land after — a
+         * one-time no-op at worst (see widget_host_data_cb()), not a crash,
+         * given at most one widget is ever open. */
+        host_on_data(NULL);
+        host_set_topics(NULL, 0);
+        s_nhosttopics = 0;
+    }
+
     if (s_task) {
         s_stop = true;
         /* The task touches LVGL, so it must not be waited on while we hold the

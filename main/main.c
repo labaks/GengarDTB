@@ -12,6 +12,7 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "host.h"
 #include "input.h"
 #include "net.h"
 #include "nvs_flash.h"
@@ -502,6 +503,11 @@ void app_main(void)
      * the first frame. Returns OK with no credentials — that is a state to
      * display, not a boot failure. */
     ESP_ERROR_CHECK(net_init());
+
+    /* Same reasoning as net_init() above: up before the shell so the "pc"
+     * status reflects reality from the first frame. No agent configured (no
+     * /sd/agent.json) is a state to display, not a boot failure. */
+    ESP_ERROR_CHECK(host_init());
 
     ESP_ERROR_CHECK(shell_start(io, panel));
 

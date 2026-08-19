@@ -7,6 +7,7 @@ idf_component_register(
         shell
         registry
         net
+        host
         nvs_flash
         esp_lcd
     EMBED_TXTFILES

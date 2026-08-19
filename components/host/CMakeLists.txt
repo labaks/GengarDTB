@@ -1,0 +1,15 @@
+idf_component_register(
+    SRCS
+        "host.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        bsp
+        json
+        esp_event
+        esp_hw_support
+        esp_netif
+        lwip
+        mdns
+        esp_websocket_client
+)

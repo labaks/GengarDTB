@@ -10,6 +10,7 @@ idf_component_register(
         registry
         widget
         net
+        host
         esp_lcd
         nvs_flash
         esp_app_format

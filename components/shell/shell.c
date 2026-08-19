@@ -18,6 +18,7 @@
 #include "bsp.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
+#include "host.h"
 #include "input.h"
 #include "lvgl.h"
 #include "net.h"
@@ -131,6 +132,15 @@ static void on_net_state(net_state_t state)
         status_refresh();
         lvgl_port_unlock();
     }
+}
+
+/* Called from the host client's supervisor/WS-event task — shell_set_host_connected()
+ * already takes the LVGL lock itself, same as widget.c's capability check reads
+ * s_host_connected without one (a plain bool, same informal convention net.c
+ * uses for its own state). */
+static void on_host_state(host_state_t state)
+{
+    shell_set_host_connected(state == HOST_UP);
 }
 
 void shell_set_host_connected(bool connected)
@@ -606,6 +616,7 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
 
     lv_timer_create(shell_tick, 10, NULL);
     net_on_state_change(on_net_state);
+    host_on_state_change(on_host_state);
 
     lvgl_port_unlock();
 

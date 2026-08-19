@@ -8,6 +8,7 @@ idf_component_register(
     REQUIRES
         registry
         net
+        host
         json
         esp_http_client
         esp-tls
