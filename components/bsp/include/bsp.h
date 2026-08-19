@@ -61,6 +61,13 @@ esp_err_t bsp_display_probe_id(esp_lcd_panel_io_handle_t io,
 esp_err_t bsp_backlight_set(uint8_t percent);
 uint8_t   bsp_backlight_get(void);
 
+/* NVS-backed persistence, same pattern as touch calibration. Load is a pure
+ * query (returns fallback_pct if nothing saved) — it does not call
+ * bsp_backlight_set, since the caller knows when it is actually safe to
+ * light the panel. */
+esp_err_t bsp_backlight_save(uint8_t percent);
+uint8_t   bsp_backlight_load(uint8_t fallback_pct);
+
 /* ---------------- Touch (XPT2046, software SPI) ---------------- */
 
 typedef struct {
@@ -74,13 +81,27 @@ esp_err_t bsp_touch_init(void);
 /* Non-blocking. Returns the debounced current state; safe to poll from the LVGL task. */
 void bsp_touch_read(bsp_touch_state_t *out);
 
-/* Raw ADC readings, for building a calibration screen. */
+/* Raw ADC readings, for building a calibration screen. Returns true on any
+ * physical contact (PENIRQ), independent of pressure — bsp_touch_read()'s
+ * Z_THRESHOLD click-debounce is not applied here, so a light, precisely
+ * aimed touch (e.g. a calibration target) still counts as a touch. */
 bool bsp_touch_read_raw(uint16_t *out_x, uint16_t *out_y, uint16_t *out_z);
 
-/* Calibration bounds. Defaults are typical XPT2046 values and WILL be slightly off
- * on any given panel — persist real ones once the calibration app exists. */
-void bsp_touch_set_calibration(uint16_t x_min, uint16_t x_max,
-                               uint16_t y_min, uint16_t y_max);
+/* lo/hi per axis: the raw reading at screen coordinate 0 and at screen
+ * coordinate max, respectively — NOT a numeric min/max. A resistive panel can
+ * be wired either way round on a given axis, so lo > hi is a legitimate,
+ * calibrated reversed axis. Defaults are typical XPT2046 values and WILL be
+ * off on any given panel — persist real ones once the calibration app exists. */
+void bsp_touch_set_calibration(uint16_t x_lo, uint16_t x_hi,
+                               uint16_t y_lo, uint16_t y_hi);
+
+/* NVS-backed persistence for the above. Load returns ESP_ERR_NVS_NOT_FOUND on a
+ * first boot with no saved calibration — that is the shell's cue to run the
+ * calibration screen once, not a fault. Save both writes NVS and applies the
+ * values immediately via bsp_touch_set_calibration. */
+esp_err_t bsp_touch_load_calibration(void);
+esp_err_t bsp_touch_save_calibration(uint16_t x_lo, uint16_t x_hi,
+                                     uint16_t y_lo, uint16_t y_hi);
 
 /* ---------------- Storage ---------------- */
 

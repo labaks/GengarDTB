@@ -1,7 +1,10 @@
-{"src":"http","url":"https://api.open-meteo.com/v1/forecast?latitude=42.14&longitude=24.75&current=temperature_2m,apparent_temperature,weather_code&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=1","every":900}
+{"src":"http","url":"https://api.open-meteo.com/v1/forecast?latitude=42.14&longitude=24.75&current=temperature_2m,apparent_temperature,weather_code,relative_humidity_2m&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=1","every":900}
+{"dict":"weather_code","map":{"0":"Clear sky","1":"Mainly clear","2":"Partly cloudy","3":"Cloudy","45":"Fog","48":"Rime fog","51":"Light drizzle","53":"Drizzle","55":"Dense drizzle","56":"Freezing drizzle","57":"Freezing drizzle","61":"Light rain","63":"Rain","65":"Heavy rain","66":"Freezing rain","67":"Freezing rain","71":"Light snow","73":"Snow","75":"Heavy snow","77":"Snow grains","80":"Rain showers","81":"Rain showers","82":"Violent showers","85":"Snow showers","86":"Snow showers","95":"Thunderstorm","96":"Thunderstorm, hail","99":"Thunderstorm, hail"}}
 {"obj":"rect","x":0,"y":0,"w":320,"h":44,"color":"0x1E2A38"}
 {"obj":"label","x":12,"y":12,"font":20,"color":"0xFFFFFF","text":"Plovdiv"}
 {"obj":"label","x":12,"y":60,"font":28,"color":"0xFFFFFF","text":"{{current.temperature_2m}} C"}
 {"obj":"label","x":12,"y":104,"font":14,"color":"0xC0C8D0","text":"feels like {{current.apparent_temperature}} C"}
 {"obj":"label","x":12,"y":134,"font":20,"color":"0xC0C8D0","text":"{{daily.temperature_2m_min.0}} ... {{daily.temperature_2m_max.0}}"}
-{"obj":"label","x":12,"y":176,"font":14,"color":"0x8899A6","text":"open-meteo, code {{current.weather_code}}"}
+{"obj":"label","x":12,"y":176,"font":14,"color":"0x8899A6","text":"open-meteo, {{current.weather_code | dict:weather_code}}"}
+{"obj":"label","x":12,"y":204,"font":14,"color":"0xC0C8D0","text":"humidity"}
+{"obj":"bar","x":90,"y":206,"w":170,"h":12,"min":0,"max":100,"value":"{{current.relative_humidity_2m}}"}

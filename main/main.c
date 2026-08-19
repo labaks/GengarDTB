@@ -41,6 +41,8 @@ EMBEDDED(hello_manifest_json);
 EMBEDDED(hello_ui_jsonl);
 EMBEDDED(weather_manifest_json);
 EMBEDDED(weather_ui_jsonl);
+EMBEDDED(clock_manifest_json);
+EMBEDDED(clock_ui_jsonl);
 
 /* Compares CONTENT, not just size. Size alone is a trap: changing the weather
  * widget's coordinates from Moscow to Plovdiv altered no byte count at all, so
@@ -119,6 +121,10 @@ static void provision_builtin_apps(void)
     provision_builtin("weather",
                       weather_manifest_json_start, EMB_LEN(weather_manifest_json),
                       weather_ui_jsonl_start,      EMB_LEN(weather_ui_jsonl));
+
+    provision_builtin("clock",
+                      clock_manifest_json_start, EMB_LEN(clock_manifest_json),
+                      clock_ui_jsonl_start,      EMB_LEN(clock_ui_jsonl));
 }
 
 /* The buttons are not soldered yet. Until they are, boot with the touch-zone

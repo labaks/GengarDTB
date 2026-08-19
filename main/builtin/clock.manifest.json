@@ -1,0 +1,9 @@
+{
+  "api": 1,
+  "id": "clock",
+  "name": "Clock",
+  "version": "0.1.0",
+  "layer": "declarative",
+  "entry": "ui.jsonl",
+  "capabilities": ["time"]
+}

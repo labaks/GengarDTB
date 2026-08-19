@@ -1,0 +1,6 @@
+{"src":"clock"}
+{"obj":"rect","x":0,"y":0,"w":320,"h":44,"color":"0x1E2A38"}
+{"obj":"label","x":12,"y":12,"font":20,"color":"0xFFFFFF","text":"Clock"}
+{"obj":"label","x":12,"y":76,"font":28,"color":"0xFFFFFF","text":"{{time}}"}
+{"obj":"label","x":12,"y":126,"font":20,"color":"0xC0C8D0","text":"{{weekday}}"}
+{"obj":"label","x":12,"y":156,"font":14,"color":"0x8899A6","text":"{{date}}"}

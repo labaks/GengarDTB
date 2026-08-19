@@ -57,3 +57,9 @@ CONFIG_LV_USE_LIST=y
 CONFIG_LV_USE_IMAGE=y
 CONFIG_LV_USE_BAR=y
 CONFIG_LV_USE_ARC=y
+
+# Lets an "image" view load an LVGL .bin icon straight off /fs or /sd by
+# plain POSIX path (e.g. "A:/fs/apps/weather/icon.bin") — same stdio fopen()
+# already used everywhere else in this project, just wired into LVGL too.
+CONFIG_LV_USE_FS_STDIO=y
+CONFIG_LV_FS_STDIO_LETTER=65

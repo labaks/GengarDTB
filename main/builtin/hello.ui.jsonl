@@ -2,4 +2,8 @@
 {"obj":"label","x":12,"y":12,"font":20,"color":"0xFFFFFF","text":"deskos layer A"}
 {"obj":"label","x":12,"y":62,"w":296,"font":14,"color":"0xC0C8D0","text":"This whole screen is one ui.jsonl file on the filesystem."}
 {"obj":"label","x":12,"y":104,"w":296,"font":14,"color":"0xC0C8D0","text":"No application code runs on the device. Views plus data bindings only."}
-{"obj":"label","x":12,"y":160,"font":14,"color":"0x8899A6","text":"B1+B3 returns to the launcher"}
+{"obj":"line","x1":12,"y1":140,"x2":308,"y2":140,"color":"0x2A3642","width":1}
+{"obj":"label","x":12,"y":150,"w":180,"font":14,"color":"0x8899A6","text":"bar / arc, static values:"}
+{"obj":"bar","x":12,"y":176,"w":180,"h":14,"min":0,"max":100,"value":"65"}
+{"obj":"arc","x":210,"y":150,"w":60,"h":60,"min":0,"max":100,"value":"30"}
+{"obj":"label","x":12,"y":204,"font":14,"color":"0x8899A6","text":"B1+B3 returns to the launcher"}

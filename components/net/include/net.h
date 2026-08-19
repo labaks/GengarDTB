@@ -41,6 +41,16 @@ esp_err_t net_set_credentials(const char *ssid, const char *password);
 /* Copies the SSID currently in use. False when none is configured. */
 bool net_get_ssid(char *out, size_t out_size);
 
+/* Persists a POSIX TZ string to NVS and applies it immediately (setenv+tzset) —
+ * takes effect on the very next localtime() call, no reboot needed. The
+ * build-time fallback is CONFIG_DESKOS_TZ. See Kconfig.projbuild for the
+ * "POSIX TZ counts backwards" warning before constructing one by hand. */
+esp_err_t net_set_timezone(const char *tz);
+
+/* Copies the TZ string currently in effect (NVS override or the build-time
+ * default) into out. Always succeeds — there is always an effective TZ. */
+void net_get_timezone(char *out, size_t out_size);
+
 void net_on_state_change(net_state_cb_t cb);
 
 #ifdef __cplusplus

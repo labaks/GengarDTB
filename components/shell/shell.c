@@ -21,6 +21,8 @@
 #include "input.h"
 #include "lvgl.h"
 #include "net.h"
+#include "nvs.h"
+#include "settings.h"
 #include "widget.h"
 
 static const char *TAG = "shell";
@@ -144,6 +146,11 @@ void shell_set_host_connected(bool connected)
     }
 }
 
+lv_group_t *shell_input_group(void)
+{
+    return s_group;
+}
+
 /* ------------------------------------------------------------ system chords */
 
 /* The two layouts differ by more than one binding, so the mapping is chosen from
@@ -160,6 +167,7 @@ static void step_backlight(void)
     uint8_t pct = bsp_backlight_get();
     pct = (pct >= 100) ? 20 : (uint8_t)(pct + 20);
     bsp_backlight_set(pct);
+    bsp_backlight_save(pct);
     ESP_LOGI(TAG, "system: backlight %u%%", pct);
 }
 
@@ -168,6 +176,10 @@ static void go_home(const char *why)
     if (widget_is_open()) {
         ESP_LOGI(TAG, "system: home (%s), closing '%s'", why, widget_current()->id);
         widget_close();
+    }
+    if (settings_is_open()) {
+        ESP_LOGI(TAG, "system: home (%s), closing settings", why);
+        settings_close();
     }
 }
 
@@ -201,6 +213,7 @@ static bool handle_system_chord(const input_event_t *ev)
         if (ev->mask == INPUT_MASK_ALL && longp) {
             ESP_LOGW(TAG, "system: force return to launcher");
             widget_close();
+            settings_close();
             return true;
         }
     } else {
@@ -211,6 +224,7 @@ static bool handle_system_chord(const input_event_t *ev)
         if (ev->mask == (INPUT_B1 | INPUT_B2) && longp) {
             ESP_LOGW(TAG, "system: force return to launcher");
             widget_close();
+            settings_close();
             return true;
         }
     }
@@ -287,6 +301,16 @@ static void app_clicked(lv_event_t *e)
     }
 }
 
+static void settings_clicked(lv_event_t *e)
+{
+    (void)e;
+    ESP_LOGI(TAG, "opening settings");
+    const esp_err_t err = settings_open();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "cannot open settings: %s", esp_err_to_name(err));
+    }
+}
+
 static void build_launcher(void)
 {
     lv_obj_t *scr = lv_screen_active();
@@ -306,7 +330,6 @@ static void build_launcher(void)
         lv_label_set_text(empty,
                           bsp_sd_is_mounted() ? "No apps in /sd/apps"
                                               : "Insert microSD card");
-        return;
     }
 
     for (size_t i = 0; i < n; i++) {
@@ -325,6 +348,162 @@ static void build_launcher(void)
         lv_obj_add_event_cb(btn, app_clicked, LV_EVENT_CLICKED, (void *)app);
         lv_group_add_obj(s_group, btn);
     }
+
+    /* Settings is not from the registry — a fixed entry the shell always
+     * adds itself, same list, no separate system combo (see
+     * docs/shell-navigation.md). Always present, even with zero apps/no card,
+     * so it stays reachable in every state. */
+    lv_obj_t *settings_btn = lv_list_add_button(s_list, NULL, "Settings");
+    lv_obj_add_event_cb(settings_btn, settings_clicked, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(s_group, settings_btn);
+}
+
+/* ------------------------------------------------------- touch calibration */
+
+/* Inset from the physical edge: resistive panels are hard to hit exactly at
+ * pixel 0, and a target placed here still calibrates the true edges — a touch
+ * right at the target maps to screen 0/max, everything beyond just clamps.
+ *
+ * Touches near the top edge are measurably noisier/less repeatable than the
+ * rest of the panel on this unit (worse with a stylus than a finger). Tried
+ * widening this to 40px on the theory that the inset targets themselves sat
+ * in the noisiest part of the panel — made no difference, so reverted. The
+ * instability is not fixable by where the calibration targets sit; see
+ * CLAUDE.md for the current state of that investigation. */
+#define CAL_INSET 24
+
+typedef struct { int16_t x, y; } cal_point_t;
+
+static void cal_wait_for_release(void)
+{
+    uint16_t x, y, z;
+    while (bsp_touch_read_raw(&x, &y, &z)) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+static uint16_t median_of(uint16_t *v, int n)
+{
+    /* n is at most CAL_SAMPLES (32) — insertion sort is plenty. */
+    for (int i = 1; i < n; i++) {
+        const uint16_t key = v[i];
+        int j = i - 1;
+        while (j >= 0 && v[j] > key) {
+            v[j + 1] = v[j];
+            j--;
+        }
+        v[j + 1] = key;
+    }
+    return v[n / 2];
+}
+
+#define CAL_SAMPLES     32
+#define CAL_MIN_SAMPLES 10   /* ~200ms held — a shorter tap/bounce is rejected
+                               * rather than trusted; two calibration runs
+                               * gave meaningfully different Y bounds (span
+                               * 3081 vs. 1612), and the runs with fewer
+                               * samples per point were the noisier ones. */
+
+/* The very first sample right as contact begins can catch a transient rather
+ * than a settled reading (this is what burned the first calibration attempt:
+ * saved bounds a real tap could never reproduce). Sampling for the whole hold
+ * and taking the median is what "touch and hold the target" actually needs
+ * to mean for this to work. Returns false on a too-brief touch; the caller
+ * retries silently rather than calibrating off an unreliable capture. */
+static bool cal_capture_one(uint16_t *out_rx, uint16_t *out_ry)
+{
+    uint16_t x, y, z;
+    while (!bsp_touch_read_raw(&x, &y, &z)) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    uint16_t xs[CAL_SAMPLES], ys[CAL_SAMPLES];
+    int n = 0;
+    do {
+        if (n < CAL_SAMPLES) {
+            xs[n] = x;
+            ys[n] = y;
+            n++;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    } while (bsp_touch_read_raw(&x, &y, &z) && n < CAL_SAMPLES);
+
+    if (n < CAL_MIN_SAMPLES) {
+        return false;
+    }
+    *out_rx = median_of(xs, n);
+    *out_ry = median_of(ys, n);
+    return true;
+}
+
+static void cal_wait_for_press(uint16_t *out_rx, uint16_t *out_ry)
+{
+    while (!cal_capture_one(out_rx, out_ry)) {
+        /* too brief to trust — try again, same target */
+    }
+}
+
+/* Runs before indevs/launcher exist, so it polls the raw touch reading
+ * directly (see bsp.h) rather than going through an LVGL indev. Targets are
+ * added to whatever screen is already active and removed again afterwards —
+ * build_launcher() draws onto that same screen right after this returns. */
+static void run_touch_calibration(void)
+{
+    static const cal_point_t targets[4] = {
+        { CAL_INSET,                     CAL_INSET },
+        { BSP_LCD_H_RES - 1 - CAL_INSET, CAL_INSET },
+        { CAL_INSET,                     BSP_LCD_V_RES - 1 - CAL_INSET },
+        { BSP_LCD_H_RES - 1 - CAL_INSET, BSP_LCD_V_RES - 1 - CAL_INSET },
+    };
+    uint16_t rx[4], ry[4];
+
+    lvgl_port_lock(0);
+    lv_obj_t *label = lv_label_create(lv_screen_active());
+    lv_obj_set_style_text_color(label, lv_color_hex(0xC0C8D0), LV_PART_MAIN);
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_t *dot = lv_obj_create(lv_screen_active());
+    lv_obj_remove_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(dot, 20, 20);
+    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(dot, lv_color_hex(0x4A9EFF), LV_PART_MAIN);
+    lv_obj_set_style_border_width(dot, 0, LV_PART_MAIN);
+    lvgl_port_unlock();
+
+    /* A finger already down from handling the board must not count. */
+    cal_wait_for_release();
+
+    for (int i = 0; i < 4; i++) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "touch + hold %d/4", i + 1);
+
+        lvgl_port_lock(0);
+        lv_label_set_text(label, buf);
+        lv_obj_set_pos(dot, targets[i].x - 10, targets[i].y - 10);
+        lvgl_port_unlock();
+
+        cal_wait_for_press(&rx[i], &ry[i]);
+        cal_wait_for_release();
+    }
+
+    lvgl_port_lock(0);
+    lv_obj_delete(label);
+    lv_obj_delete(dot);
+    lvgl_port_unlock();
+
+    /* targets[] order is TL, TR, BL, BR. bsp_touch_read() maps raw Y to
+     * screen X and raw X to screen Y (inverted) — see bsp_touch.c — so the
+     * left/right pair calibrates Y (lo/hi = reading at screen 0/max) and the
+     * top/bottom pair calibrates X the same way. Whichever pair comes out
+     * numerically reversed is a real, valid axis polarity — not an error. */
+    const uint16_t y_lo = (uint16_t)((ry[0] + ry[2]) / 2);   /* left:  TL, BL */
+    const uint16_t y_hi = (uint16_t)((ry[1] + ry[3]) / 2);   /* right: TR, BR */
+    const uint16_t x_hi = (uint16_t)((rx[0] + rx[1]) / 2);   /* top:   TL, TR */
+    const uint16_t x_lo = (uint16_t)((rx[2] + rx[3]) / 2);   /* bottom:BL, BR */
+
+    const esp_err_t err = bsp_touch_save_calibration(x_lo, x_hi, y_lo, y_hi);
+    ESP_LOGI(TAG, "touch calibration saved: x[%u,%u] y[%u,%u] (%s)",
+             x_lo, x_hi, y_lo, y_hi, esp_err_to_name(err));
 }
 
 /* --------------------------------------------------------------------- setup */
@@ -393,6 +572,20 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
      * show the previous firmware's pixels. */
     lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x101418), LV_PART_MAIN);
     lv_obj_invalidate(lv_screen_active());
+    lvgl_port_unlock();
+
+    /* First frame is drawn; safe to light the panel now — the calibration
+     * screen right below needs it on to be of any use. */
+    bsp_backlight_set(bsp_backlight_load(BACKLIGHT_DEFAULT));
+
+    if (bsp_touch_load_calibration() == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGI(TAG, "no touch calibration in NVS, running it now");
+        run_touch_calibration();
+    }
+
+    if (!lvgl_port_lock(0)) {
+        return ESP_FAIL;
+    }
 
     s_group = lv_group_create();
     lv_group_set_default(s_group);
@@ -415,9 +608,6 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
     net_on_state_change(on_net_state);
 
     lvgl_port_unlock();
-
-    /* First frame is drawn; safe to light the panel now. */
-    bsp_backlight_set(BACKLIGHT_DEFAULT);
 
     ESP_LOGI(TAG, "shell up");
     return ESP_OK;

@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "widget.c"
         "datasource.c"
+        "datasource_http.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

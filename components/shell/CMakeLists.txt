@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "shell.c"
+        "settings.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -10,4 +11,7 @@ idf_component_register(
         widget
         net
         esp_lcd
+        nvs_flash
+        esp_app_format
+        esp_system
 )

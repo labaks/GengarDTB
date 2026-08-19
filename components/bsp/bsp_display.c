@@ -9,8 +9,12 @@
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_vendor.h"
+#include "nvs.h"
 
 static const char *TAG = "bsp.disp";
+
+#define NVS_NAMESPACE      "deskos"
+#define NVS_KEY_BACKLIGHT  "backlight"
 
 #define BL_LEDC_TIMER    LEDC_TIMER_0
 #define BL_LEDC_CHANNEL  LEDC_CHANNEL_0
@@ -59,6 +63,32 @@ esp_err_t bsp_backlight_set(uint8_t percent)
 uint8_t bsp_backlight_get(void)
 {
     return s_backlight_pct;
+}
+
+esp_err_t bsp_backlight_save(uint8_t percent)
+{
+    nvs_handle_t h;
+    ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h), TAG, "nvs open");
+    esp_err_t err = nvs_set_u8(h, NVS_KEY_BACKLIGHT, percent);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+/* Query only — does not call bsp_backlight_set. The caller decides when it is
+ * actually safe to light the panel (see shell_start: only after the first
+ * frame is drawn), so applying the loaded value is left to them. */
+uint8_t bsp_backlight_load(uint8_t fallback_pct)
+{
+    nvs_handle_t h;
+    uint8_t pct = fallback_pct;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, NVS_KEY_BACKLIGHT, &pct);
+        nvs_close(h);
+    }
+    return pct;
 }
 
 esp_err_t bsp_display_deinit(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel)

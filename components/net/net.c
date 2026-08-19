@@ -19,6 +19,7 @@ static const char *TAG = "net";
 #define NVS_NAMESPACE "deskos"
 #define NVS_KEY_SSID  "wifi_ssid"
 #define NVS_KEY_PASS  "wifi_pass"
+#define NVS_KEY_TZ    "tz"
 
 /* Reconnect backoff. Capped rather than unbounded: this device sits on a desk
  * and the access point may simply be off for the night — it should keep trying
@@ -135,6 +136,49 @@ bool net_get_ssid(char *out, size_t out_size)
     return true;
 }
 
+/* ------------------------------------------------------------------ timezone */
+
+void net_get_timezone(char *out, size_t out_size)
+{
+    if (!out || out_size == 0) {
+        return;
+    }
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        size_t n = out_size;
+        const esp_err_t err = nvs_get_str(h, NVS_KEY_TZ, out, &n);
+        nvs_close(h);
+        if (err == ESP_OK && out[0]) {
+            return;
+        }
+    }
+    snprintf(out, out_size, "%s", CONFIG_DESKOS_TZ);
+}
+
+esp_err_t net_set_timezone(const char *tz)
+{
+    if (!tz || !*tz) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t h;
+    ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h), TAG, "nvs open");
+    esp_err_t err = nvs_set_str(h, NVS_KEY_TZ, tz);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    setenv("TZ", tz, 1);
+    tzset();
+    ESP_LOGI(TAG, "timezone set to '%s'", tz);
+    return ESP_OK;
+}
+
 /* ------------------------------------------------------------------ events */
 
 static void retry_task(void *arg)
@@ -229,7 +273,9 @@ esp_err_t net_init(void)
 
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start");
 
-    setenv("TZ", CONFIG_DESKOS_TZ, 1);
+    char tz[48];
+    net_get_timezone(tz, sizeof(tz));
+    setenv("TZ", tz, 1);
     tzset();
 
     esp_sntp_config_t sntp_cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG(CONFIG_DESKOS_SNTP_SERVER);
