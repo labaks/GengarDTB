@@ -59,8 +59,24 @@ static cJSON            *s_dicts;
  * outlive the object, so it cannot live on add_view()'s stack. */
 static lv_point_precise_t s_line_pts[WIDGET_MAX_OBJS][2];
 
-static char              s_url[256];
-static uint32_t          s_every_s;
+/* Each {"src":"http",...} line becomes one of these. An unnamed source (no
+ * "as") spreads its fields at the document's top level — the shape every
+ * single-source widget has always rendered against. A named one nests under
+ * its own key, so {{weather.current...}} and {{fx.rates...}} can live in the
+ * same widget at different poll periods without colliding. */
+typedef struct {
+    char     name[24];
+    char     url[256];
+    uint32_t every_s;
+    uint32_t elapsed_s;
+} wsource_t;
+
+#define WIDGET_MAX_SOURCES 4
+
+static wsource_t         s_sources[WIDGET_MAX_SOURCES];
+static size_t            s_nsources;
+static cJSON            *s_combined;   /* persists across fetches; each source
+                                         * updates its own slice of it */
 static bool              s_has_clock;
 static TaskHandle_t      s_task;
 static volatile bool     s_stop;
@@ -314,10 +330,18 @@ static void parse_line(const char *line, int line_no)
     const char *src = cJSON_GetStringValue(cJSON_GetObjectItem(root, "src"));
     if (src && strcmp(src, "http") == 0) {
         const char *url = cJSON_GetStringValue(cJSON_GetObjectItem(root, "url"));
-        if (url) {
-            snprintf(s_url, sizeof(s_url), "%s", url);
+        const char *as  = cJSON_GetStringValue(cJSON_GetObjectItem(root, "as"));
+        if (!url) {
+            report_error(line_no, "http source missing 'url'");
+        } else if (s_nsources >= WIDGET_MAX_SOURCES) {
+            report_error(line_no, "too many sources (max %d)", WIDGET_MAX_SOURCES);
+        } else {
+            wsource_t *s = &s_sources[s_nsources++];
+            snprintf(s->name, sizeof(s->name), "%s", as ? as : "");
+            snprintf(s->url, sizeof(s->url), "%s", url);
             const int every = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(root, "every"));
-            s_every_s = (every < REFRESH_MIN_S) ? REFRESH_MIN_S : (uint32_t)every;
+            s->every_s = (every < REFRESH_MIN_S) ? REFRESH_MIN_S : (uint32_t)every;
+            s->elapsed_s = s->every_s;   /* due immediately on the scheduler's first tick */
         }
     } else if (src && strcmp(src, "clock") == 0) {
         /* Local source: no fetch, no network dependency. Ticks once a second
@@ -376,6 +400,37 @@ static void set_status(const char *text)
     }
 }
 
+/* Folds one source's freshly-fetched body into the persistent combined
+ * document, taking ownership of `fetched` either way. Unnamed sources spread
+ * their fields at the top level — the exact shape a single-source widget has
+ * always rendered against — so existing ui.jsonl files need no changes.
+ * Named sources nest under their own key instead. Either way, a redeclare
+ * (this source's previous fetch) is replaced, same convention as "dict". */
+static void merge_source(const char *name, cJSON *fetched)
+{
+    if (!s_combined) {
+        s_combined = cJSON_CreateObject();
+    }
+    if (name && *name) {
+        cJSON_DeleteItemFromObject(s_combined, name);
+        cJSON_AddItemToObject(s_combined, name, fetched);
+        return;
+    }
+    cJSON *child = fetched->child;
+    while (child) {
+        cJSON *next = child->next;
+        cJSON_DeleteItemFromObject(s_combined, child->string);
+        cJSON_DetachItemViaPointer(fetched, child);
+        cJSON_AddItemToObject(s_combined, child->string, child);
+        child = next;
+    }
+    cJSON_Delete(fetched);   /* now an empty shell */
+}
+
+/* One tick per second, checking every source's own period independently —
+ * REFRESH_MIN_S floors each at 30s, so per-source overhead of a 1s poll is
+ * negligible. Sleeping in 200ms slices (not one vTaskDelay(1000)) keeps
+ * widget_close() from waiting up to a second for this task to notice s_stop. */
 static void refresh_task(void *arg)
 {
     (void)arg;
@@ -387,29 +442,44 @@ static void refresh_task(void *arg)
                 lvgl_port_unlock();
             }
         } else {
-            cJSON *root = NULL;
-            const esp_err_t err = datasource_fetch_json(s_url, &root);
+            bool fetched_any = false;
+            bool all_ok = true;
 
-            if (lvgl_port_lock(500)) {
-                if (err == ESP_OK) {
-                    apply_data(root);
-                    set_status("");
+            for (size_t i = 0; i < s_nsources; i++) {
+                wsource_t *s = &s_sources[i];
+                if (s->elapsed_s < s->every_s) {
+                    continue;
+                }
+                s->elapsed_s = 0;
+                fetched_any = true;
+
+                cJSON *root = NULL;
+                const esp_err_t err = datasource_fetch_json(s->url, &root);
+                if (err == ESP_OK && root) {
+                    merge_source(s->name, root);
                 } else {
                     /* Keep the last values on screen and say they are stale.
                      * Blanking the widget on a transient network hiccup is
                      * strictly worse than showing slightly old numbers. */
-                    set_status("stale");
+                    all_ok = false;
+                    if (root) {
+                        cJSON_Delete(root);
+                    }
                 }
-                lvgl_port_unlock();
             }
-            if (root) {
-                cJSON_Delete(root);
+
+            if (fetched_any && lvgl_port_lock(500)) {
+                apply_data(s_combined);
+                set_status(all_ok ? "" : "stale");
+                lvgl_port_unlock();
             }
         }
 
-        /* Sleep in slices so closing the widget does not wait a whole period. */
-        for (uint32_t i = 0; i < s_every_s * 5 && !s_stop; i++) {
+        for (uint32_t i = 0; i < 5 && !s_stop; i++) {
             vTaskDelay(pdMS_TO_TICKS(200));
+        }
+        for (size_t i = 0; i < s_nsources; i++) {
+            s_sources[i].elapsed_s++;
         }
     }
 
@@ -506,8 +576,7 @@ esp_err_t widget_open(const app_info_t *app)
 
     s_app = app;
     s_nobjs = 0;
-    s_url[0] = '\0';
-    s_every_s = 0;
+    s_nsources = 0;
     s_has_clock = false;
     memset(s_objs, 0, sizeof(s_objs));
     s_err_buf[0] = '\0';
@@ -580,12 +649,14 @@ esp_err_t widget_open(const app_info_t *app)
     }
 
     lv_screen_load(s_screen);
-    ESP_LOGI(TAG, "opened '%s': %u view(s), %d parse issue(s)%s", app->id, (unsigned)s_nobjs,
-             s_err_count, s_has_clock ? ", clock source" : (s_url[0] ? ", http source" : ", static"));
+    ESP_LOGI(TAG, "opened '%s': %u view(s), %u source(s), %d parse issue(s)%s", app->id,
+             (unsigned)s_nobjs, (unsigned)s_nsources, s_err_count,
+             s_has_clock ? ", clock source" : (s_nsources ? "" : ", static"));
 
-    /* Clock and http are alternatives, not layered — ROADMAP #10 (multiple sources
-     * per widget) is not built yet. A manifest declaring both gets the clock,
-     * since that is the one that does not depend on the network being up. */
+    /* Clock and http are still alternatives, not layered: clock is the one
+     * source that does not depend on the network, so a manifest declaring
+     * both gets the clock. Multiple *http* sources in the same widget (this
+     * task, ROADMAP #10) are fine — see merge_source(). */
     if (s_has_clock) {
         s_stop = false;
         if (xTaskCreatePinnedToCore(clock_task, "wdg_clock", 4096, NULL, 3, &s_task, 1)
@@ -593,7 +664,11 @@ esp_err_t widget_open(const app_info_t *app)
             ESP_LOGE(TAG, "cannot start clock task");
             s_task = NULL;
         }
-    } else if (s_url[0]) {
+    } else if (s_nsources > 0) {
+        /* Otherwise the corner sits blank until the first fetch lands, which
+         * can take up to the ~10s TLS connect timeout — indistinguishable
+         * from a widget that simply has nothing to report. */
+        set_status("loading");
         s_stop = false;
         if (xTaskCreatePinnedToCore(refresh_task, "wdg_refresh", 6144, NULL, 3, &s_task, 0)
                 != pdPASS) {
@@ -629,6 +704,11 @@ void widget_close(void)
         cJSON_Delete(s_dicts);
         s_dicts = NULL;
     }
+    if (s_combined) {
+        cJSON_Delete(s_combined);
+        s_combined = NULL;
+    }
+    s_nsources = 0;
 
     if (s_screen) {
         if (s_prev_screen) {
