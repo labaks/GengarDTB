@@ -30,6 +30,13 @@ bool widget_is_open(void);
 /* Widget currently on screen, or NULL. */
 const app_info_t *widget_current(void);
 
+/* Marks every http source as due, so the refresh task fetches all of them on
+ * its next tick (within ~1s) instead of waiting out `every`. The manifest
+ * "refresh" binding (ROADMAP #16) is the only caller so far. A no-op when no
+ * widget is open or the open one has no http sources — host topics arrive by
+ * push and cannot be hurried, and clock has nothing to fetch at all. */
+void widget_refresh_now(void);
+
 #ifdef __cplusplus
 }
 #endif

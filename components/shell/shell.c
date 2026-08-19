@@ -284,6 +284,16 @@ static void shell_tick(lv_timer_t *timer)
             continue;
         }
 
+        /* System chords always get first refusal (above) — a manifest
+         * binding that collides with one simply never reaches this check,
+         * which is the whole conflict-resolution rule from ROADMAP #16. */
+        if (widget_is_open() &&
+            app_registry_action_for(widget_current(), &ev) == APP_ACTION_REFRESH) {
+            ESP_LOGI(TAG, "app binding: refresh '%s'", widget_current()->id);
+            widget_refresh_now();
+            continue;
+        }
+
         const uint32_t key = translate_key(&ev);
         if (key) {
             key_push(key);

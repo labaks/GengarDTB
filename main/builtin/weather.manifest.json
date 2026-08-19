@@ -6,5 +6,6 @@
   "layer": "declarative",
   "entry": "ui.jsonl",
   "capabilities": ["net.http", "time"],
-  "poll_sec": 900
+  "poll_sec": 900,
+  "bindings": {"B1+B2 click": "refresh"}
 }

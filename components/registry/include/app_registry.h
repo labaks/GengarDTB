@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "input.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,16 +32,40 @@ typedef enum {
     APP_LAYER_LUA,          /* main.lua. Not implemented yet — layer B. */
 } app_layer_t;
 
+/* Layer A has no code, so a "binding" can only name one of a small, fixed
+ * set of actions the runtime itself knows how to perform — not an arbitrary
+ * app-defined handler. refresh is the only one so far (ROADMAP #16): force
+ * a widget's http sources to re-fetch now instead of waiting out `every`. */
+typedef enum {
+    APP_ACTION_NONE = 0,
+    APP_ACTION_REFRESH,
+} app_action_t;
+
+#define APP_MAX_BINDINGS 4
+
 typedef struct {
-    char        id[24];
-    char        name[40];
-    char        version[16];
-    char        entry[32];
-    char        dir[80];
-    app_layer_t layer;
-    uint32_t    caps;
-    int         api;
+    input_event_t ev;
+    app_action_t  action;
+} app_binding_t;
+
+typedef struct {
+    char          id[24];
+    char          name[40];
+    char          version[16];
+    char          entry[32];
+    char          dir[80];
+    app_layer_t   layer;
+    uint32_t      caps;
+    int           api;
+    app_binding_t bindings[APP_MAX_BINDINGS];
+    size_t        nbindings;
 } app_info_t;
+
+/* Looks up the action bound to `ev` in app's manifest, or APP_ACTION_NONE.
+ * The shell calls this only after its own system chords have already had
+ * first refusal — see shell.c — so a binding that collides with a system
+ * combo simply never reaches here, no separate conflict table needed. */
+app_action_t app_registry_action_for(const app_info_t *app, const input_event_t *ev);
 
 /* Rescans the card. Safe to call with no card inserted: yields zero apps and
  * returns ESP_ERR_NOT_FOUND rather than failing the boot. */

@@ -966,3 +966,19 @@ const app_info_t *widget_current(void)
 {
     return s_app;
 }
+
+void widget_refresh_now(void)
+{
+    if (s_nsources == 0) {
+        return;   /* nothing to fetch — host topics arrive by push, not on demand */
+    }
+    for (size_t i = 0; i < s_nsources; i++) {
+        s_sources[i].elapsed_s = s_sources[i].every_s;
+    }
+    /* Visible the instant the button is pressed, not only once the fetch
+     * (up to ~1s away, plus network time) actually lands — otherwise a
+     * refresh that was already showing "" looks like the button did nothing.
+     * Called from shell_tick, which already runs on the LVGL task, so no
+     * separate lvgl_port_lock() is needed here (see its own doc comment). */
+    set_status("refreshing...");
+}

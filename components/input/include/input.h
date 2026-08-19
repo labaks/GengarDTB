@@ -86,6 +86,14 @@ void input_inject(uint8_t mask);
 /* "B1+B3 long" — for logs and for the bindings editor UI. Not reentrant. */
 const char *input_event_str(const input_event_t *ev);
 
+/* Inverse of input_event_str() — for reading a manifest's "bindings" object
+ * keys (see docs/app-format.md). Accepts exactly what input_event_str()
+ * produces: "B1", "B1+B2" or "B1+B2+B3" (any button order), a space, then one
+ * of click/dblclick/long/repeat/release. Returns false without touching
+ * *out on anything else — a typo in a manifest must not silently bind to
+ * mask 0. */
+bool input_parse_event_str(const char *s, input_event_t *out);
+
 #ifdef __cplusplus
 }
 #endif

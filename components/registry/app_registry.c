@@ -8,6 +8,7 @@
 #include "bsp.h"
 #include "cJSON.h"
 #include "esp_log.h"
+#include "input.h"
 
 static const char *TAG = "registry";
 
@@ -35,6 +36,49 @@ static uint32_t parse_caps(const cJSON *arr)
         else { ESP_LOGW(TAG, "unknown capability '%s' — ignored", s); }
     }
     return caps;
+}
+
+/* "bindings": {"B2 long": "refresh"}. Layer A has no code, so the value must
+ * name one of the runtime's own fixed actions, not an arbitrary handler — see
+ * app_action_t. A binding that will never fire because it collides with a
+ * system chord is not rejected here: shell.c gives its own chords first
+ * refusal on every event, so the collision resolves itself at dispatch time
+ * without a second reserved-combo list to keep in sync with this one. */
+static void parse_bindings(const cJSON *obj, app_info_t *out)
+{
+    if (!cJSON_IsObject(obj)) {
+        return;
+    }
+
+    const cJSON *entry = NULL;
+    cJSON_ArrayForEach(entry, obj)
+    {
+        if (out->nbindings >= APP_MAX_BINDINGS) {
+            ESP_LOGW(TAG, "%s: too many bindings (max %d) — rest ignored",
+                     out->id, APP_MAX_BINDINGS);
+            break;
+        }
+
+        input_event_t ev;
+        if (!input_parse_event_str(entry->string, &ev)) {
+            ESP_LOGW(TAG, "%s: bad binding key '%s' — ignored", out->id, entry->string);
+            continue;
+        }
+
+        const char *action_str = cJSON_GetStringValue(entry);
+        app_action_t action = APP_ACTION_NONE;
+        if (action_str && strcmp(action_str, "refresh") == 0) {
+            action = APP_ACTION_REFRESH;
+        } else {
+            ESP_LOGW(TAG, "%s: unknown binding action '%s' for '%s' — ignored",
+                     out->id, action_str ? action_str : "?", entry->string);
+            continue;
+        }
+
+        out->bindings[out->nbindings].ev = ev;
+        out->bindings[out->nbindings].action = action;
+        out->nbindings++;
+    }
 }
 
 static void copy_str(char *dst, size_t dst_sz, const cJSON *node, const char *fallback)
@@ -95,6 +139,7 @@ static bool load_manifest(const char *root_dir, const char *dir_name, app_info_t
     out->layer = (layer && strcmp(layer, "lua") == 0) ? APP_LAYER_LUA : APP_LAYER_DECLARATIVE;
 
     out->caps = parse_caps(cJSON_GetObjectItem(root, "capabilities"));
+    parse_bindings(cJSON_GetObjectItem(root, "bindings"), out);
     ok = true;
 
 done:
@@ -153,6 +198,19 @@ size_t app_registry_count(void)
 const app_info_t *app_registry_get(size_t index)
 {
     return (index < s_count) ? &s_apps[index] : NULL;
+}
+
+app_action_t app_registry_action_for(const app_info_t *app, const input_event_t *ev)
+{
+    if (!app || !ev) {
+        return APP_ACTION_NONE;
+    }
+    for (size_t i = 0; i < app->nbindings; i++) {
+        if (app->bindings[i].ev.mask == ev->mask && app->bindings[i].ev.kind == ev->kind) {
+            return app->bindings[i].action;
+        }
+    }
+    return APP_ACTION_NONE;
 }
 
 bool app_registry_is_available(const app_info_t *app, bool host_connected)

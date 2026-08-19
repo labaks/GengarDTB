@@ -275,6 +275,62 @@ void input_inject(uint8_t mask)
     s_injected = mask & INPUT_MASK_ALL;
 }
 
+bool input_parse_event_str(const char *s, input_event_t *out)
+{
+    if (!s || !out) {
+        return false;
+    }
+    const char *sp = strchr(s, ' ');
+    if (!sp) {
+        return false;
+    }
+
+    char maskpart[16];
+    const size_t masklen = (size_t)(sp - s);
+    if (masklen == 0 || masklen >= sizeof(maskpart)) {
+        return false;
+    }
+    memcpy(maskpart, s, masklen);
+    maskpart[masklen] = '\0';
+
+    uint8_t mask = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(maskpart, "+", &save); tok; tok = strtok_r(NULL, "+", &save)) {
+        if (strcmp(tok, "B1") == 0) {
+            mask |= INPUT_B1;
+        } else if (strcmp(tok, "B2") == 0) {
+            mask |= INPUT_B2;
+        } else if (strcmp(tok, "B3") == 0) {
+            mask |= INPUT_B3;
+        } else {
+            return false;
+        }
+    }
+    if (mask == 0) {
+        return false;
+    }
+
+    static const struct {
+        const char      *name;
+        input_ev_kind_t  kind;
+    } kinds[] = {
+        { "click",    INPUT_EV_CLICK },
+        { "dblclick", INPUT_EV_DOUBLE_CLICK },
+        { "long",     INPUT_EV_LONG_PRESS },
+        { "repeat",   INPUT_EV_HOLD_REPEAT },
+        { "release",  INPUT_EV_RELEASE },
+    };
+    const char *kindstr = sp + 1;
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+        if (strcmp(kindstr, kinds[i].name) == 0) {
+            out->mask = mask;
+            out->kind = kinds[i].kind;
+            return true;
+        }
+    }
+    return false;
+}
+
 const char *input_event_str(const input_event_t *ev)
 {
     static char buf[32];
