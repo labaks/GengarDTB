@@ -25,6 +25,9 @@ static const char *TAG = "widget";
 #define WIDGET_ERR_SHOWN  4         /* lines shown on screen; rest just counted */
 #define WIDGET_ERR_BUF    512
 
+#define WIDGET_CACHE_NAME ".cache.json"
+#define WIDGET_MAX_CACHE  4096      /* combined source data, not the raw ui.jsonl */
+
 typedef enum {
     WVIEW_LABEL,
     WVIEW_RECT,
@@ -77,6 +80,8 @@ static wsource_t         s_sources[WIDGET_MAX_SOURCES];
 static size_t            s_nsources;
 static cJSON            *s_combined;   /* persists across fetches; each source
                                          * updates its own slice of it */
+static bool              s_showing_cache;   /* true until the first live fetch lands */
+static time_t            s_cache_ts;        /* epoch when the on-disk cache was written */
 static bool              s_has_clock;
 static TaskHandle_t      s_task;
 static volatile bool     s_stop;
@@ -400,6 +405,112 @@ static void set_status(const char *text)
     }
 }
 
+/* -------------------------------------------------------------- disk cache */
+
+static void cache_path(char *out, size_t out_size)
+{
+    snprintf(out, out_size, "%s/%s", s_app->dir, WIDGET_CACHE_NAME);
+}
+
+/* Called right after a successful fetch, never while holding the LVGL lock —
+ * flash writes are slow enough that the UI would visibly stutter otherwise. */
+static void cache_save(void)
+{
+    if (!s_combined) {
+        return;
+    }
+
+    cJSON *wrapper = cJSON_CreateObject();
+    cJSON_AddNumberToObject(wrapper, "ts", (double)time(NULL));
+    cJSON_AddItemToObject(wrapper, "data", cJSON_Duplicate(s_combined, true));
+
+    char *text = cJSON_PrintUnformatted(wrapper);
+    cJSON_Delete(wrapper);
+    if (!text) {
+        return;
+    }
+
+    char path[192];
+    cache_path(path, sizeof(path));
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fwrite(text, 1, strlen(text), f);
+        fclose(f);
+        ESP_LOGI(TAG, "cache written: %s (%u bytes)", path, (unsigned)strlen(text));
+    }
+    cJSON_free(text);
+}
+
+/* Loads the last good response(s) from a previous session, if any, so the
+ * widget shows something the instant it opens instead of sitting blank until
+ * the first fetch — the entire point when the PC is asleep or the router is
+ * down. Autonomy is a hard requirement here (see CLAUDE.md), not a nicety. */
+static bool cache_load(void)
+{
+    char path[192];
+    cache_path(path, sizeof(path));
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return false;
+    }
+    /* Heap, not a stack array: this runs on whatever task called
+     * widget_open() (the LVGL/input task), and 4KB on its stack is exactly
+     * the kind of thing that silently corrupts the heap instead of failing
+     * loudly — which is exactly what happened here on first hardware test. */
+    char *buf = malloc(WIDGET_MAX_CACHE);
+    if (!buf) {
+        fclose(f);
+        return false;
+    }
+    const size_t n = fread(buf, 1, WIDGET_MAX_CACHE - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+
+    cJSON *wrapper = cJSON_Parse(buf);
+    free(buf);
+    if (!wrapper) {
+        return false;
+    }
+    const cJSON *data = cJSON_GetObjectItem(wrapper, "data");
+    if (!cJSON_IsObject(data)) {
+        cJSON_Delete(wrapper);
+        return false;
+    }
+
+    s_cache_ts = (time_t)cJSON_GetNumberValue(cJSON_GetObjectItem(wrapper, "ts"));
+    if (s_combined) {
+        cJSON_Delete(s_combined);
+    }
+    s_combined = cJSON_Duplicate(data, true);
+    cJSON_Delete(wrapper);
+    ESP_LOGI(TAG, "cache loaded: %s (ts %ld)", path, (long)s_cache_ts);
+    return true;
+}
+
+/* "cached" alone, honestly, when the age cannot be trusted: before the clock
+ * has ever synced, or if it somehow moved backwards past the cache's own
+ * timestamp. Showing a wrong number would be worse than showing none. */
+static void format_cache_age(char *out, size_t out_size, time_t ts)
+{
+    if (ts <= 0 || !net_time_valid()) {
+        snprintf(out, out_size, "cached");
+        return;
+    }
+    const long age_s = (long)(time(NULL) - ts);
+    if (age_s < 0) {
+        snprintf(out, out_size, "cached");
+    } else if (age_s < 60) {
+        snprintf(out, out_size, "cached just now");
+    } else if (age_s < 3600) {
+        snprintf(out, out_size, "cached %ldm ago", age_s / 60);
+    } else if (age_s < 86400) {
+        snprintf(out, out_size, "cached %ldh ago", age_s / 3600);
+    } else {
+        snprintf(out, out_size, "cached %ldd ago", age_s / 86400);
+    }
+}
+
 /* Folds one source's freshly-fetched body into the persistent combined
  * document, taking ownership of `fetched` either way. Unnamed sources spread
  * their fields at the top level — the exact shape a single-source widget has
@@ -438,11 +549,21 @@ static void refresh_task(void *arg)
     while (!s_stop) {
         if (net_state() != NET_UP) {
             if (lvgl_port_lock(200)) {
-                set_status("waiting for network");
+                if (s_showing_cache) {
+                    /* Recomputed every tick: the age keeps advancing (and the
+                     * clock may only just now have synced) while the network
+                     * stays down. */
+                    char age[32];
+                    format_cache_age(age, sizeof(age), s_cache_ts);
+                    set_status(age);
+                } else {
+                    set_status("waiting for network");
+                }
                 lvgl_port_unlock();
             }
         } else {
             bool fetched_any = false;
+            bool any_success = false;
             bool all_ok = true;
 
             for (size_t i = 0; i < s_nsources; i++) {
@@ -457,6 +578,7 @@ static void refresh_task(void *arg)
                 const esp_err_t err = datasource_fetch_json(s->url, &root);
                 if (err == ESP_OK && root) {
                     merge_source(s->name, root);
+                    any_success = true;
                 } else {
                     /* Keep the last values on screen and say they are stale.
                      * Blanking the widget on a transient network hiccup is
@@ -466,6 +588,14 @@ static void refresh_task(void *arg)
                         cJSON_Delete(root);
                     }
                 }
+            }
+
+            if (any_success) {
+                /* Live data has landed — the on-disk cache no longer has
+                 * anything to add, even if a later fetch fails and the
+                 * status goes back to "stale" rather than "cached Nh ago". */
+                cache_save();
+                s_showing_cache = false;
             }
 
             if (fetched_any && lvgl_port_lock(500)) {
@@ -577,6 +707,8 @@ esp_err_t widget_open(const app_info_t *app)
     s_app = app;
     s_nobjs = 0;
     s_nsources = 0;
+    s_showing_cache = false;
+    s_cache_ts = 0;
     s_has_clock = false;
     memset(s_objs, 0, sizeof(s_objs));
     s_err_buf[0] = '\0';
@@ -665,10 +797,20 @@ esp_err_t widget_open(const app_info_t *app)
             s_task = NULL;
         }
     } else if (s_nsources > 0) {
-        /* Otherwise the corner sits blank until the first fetch lands, which
-         * can take up to the ~10s TLS connect timeout — indistinguishable
-         * from a widget that simply has nothing to report. */
-        set_status("loading");
+        /* Show yesterday's numbers immediately rather than sit blank until
+         * the first fetch lands — the device must stay useful with the PC
+         * asleep or the router down (see CLAUDE.md's autonomy rule). Without
+         * a cache the corner would otherwise sit blank for up to the ~10s
+         * TLS connect timeout, indistinguishable from "nothing to report". */
+        if (cache_load()) {
+            apply_data(s_combined);
+            s_showing_cache = true;
+            char age[32];
+            format_cache_age(age, sizeof(age), s_cache_ts);
+            set_status(age);
+        } else {
+            set_status("loading");
+        }
         s_stop = false;
         if (xTaskCreatePinnedToCore(refresh_task, "wdg_refresh", 6144, NULL, 3, &s_task, 0)
                 != pdPASS) {
