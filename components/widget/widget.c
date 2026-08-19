@@ -1,5 +1,6 @@
 #include "widget.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,9 @@ static const char *TAG = "widget";
 #define WIDGET_MAX_UI     8192      /* a layer-A layout is a handful of lines */
 #define WIDGET_TEXT_MAX   128
 #define REFRESH_MIN_S     30        /* floor, so a typo cannot hammer an API   */
+
+#define WIDGET_ERR_SHOWN  4         /* lines shown on screen; rest just counted */
+#define WIDGET_ERR_BUF    512
 
 typedef enum {
     WVIEW_LABEL,
@@ -60,6 +64,33 @@ static uint32_t          s_every_s;
 static bool              s_has_clock;
 static TaskHandle_t      s_task;
 static volatile bool     s_stop;
+
+/* A malformed ui.jsonl used to just log a warning UART nobody was watching
+ * and quietly skip the line. That leaves a widget author staring at a blank
+ * or half-drawn screen with no idea why. Every parse problem is collected
+ * here too and shown on the widget's own screen once opening finishes. */
+static char               s_err_buf[WIDGET_ERR_BUF];
+static int                s_err_count;
+static bool               s_err_overflow_reported;
+
+static void report_error(int line_no, const char *fmt, ...)
+{
+    char msg[80];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+
+    ESP_LOGW(TAG, "line %d: %s", line_no, msg);
+
+    s_err_count++;
+    if (s_err_count > WIDGET_ERR_SHOWN) {
+        return;   /* still counted above, just not spelled out on screen */
+    }
+    char entry[128];
+    snprintf(entry, sizeof(entry), "%sline %d: %s", s_err_buf[0] ? "\n" : "", line_no, msg);
+    strncat(s_err_buf, entry, sizeof(s_err_buf) - strlen(s_err_buf) - 1);
+}
 
 /* ------------------------------------------------------------ jsonl parsing */
 
@@ -108,15 +139,19 @@ static void image_apply(lv_obj_t *obj, const char *filename)
     lv_image_set_src(obj, path);
 }
 
-static void add_view(const cJSON *line)
+static void add_view(const cJSON *line, int line_no)
 {
     if (s_nobjs >= WIDGET_MAX_OBJS) {
-        ESP_LOGW(TAG, "more than %d views, ignoring the rest", WIDGET_MAX_OBJS);
+        if (!s_err_overflow_reported) {
+            s_err_overflow_reported = true;
+            report_error(line_no, "too many views (max %d) — rest ignored", WIDGET_MAX_OBJS);
+        }
         return;
     }
 
     const char *kind = cJSON_GetStringValue(cJSON_GetObjectItem(line, "obj"));
     if (!kind) {
+        report_error(line_no, "missing 'obj'");
         return;
     }
 
@@ -235,7 +270,7 @@ static void add_view(const cJSON *line)
             image_apply(obj, rendered);
         }
     } else {
-        ESP_LOGW(TAG, "unknown view type '%s' — skipped", kind);
+        report_error(line_no, "unknown view type '%s'", kind);
         return;
     }
 
@@ -255,11 +290,11 @@ static void add_view(const cJSON *line)
     s_nobjs++;
 }
 
-static void parse_line(const char *line)
+static void parse_line(const char *line, int line_no)
 {
     cJSON *root = cJSON_Parse(line);
     if (!root) {
-        ESP_LOGW(TAG, "skipping malformed line");
+        report_error(line_no, "malformed JSON, line skipped");
         return;
     }
 
@@ -290,7 +325,7 @@ static void parse_line(const char *line)
          * http floor above. */
         s_has_clock = true;
     } else {
-        add_view(root);
+        add_view(root, line_no);
     }
 
     cJSON_Delete(root);
@@ -438,6 +473,25 @@ esp_err_t widget_open(const app_info_t *app)
     FILE *f = fopen(path, "rb");
     if (!f) {
         ESP_LOGE(TAG, "cannot open %s", path);
+
+        /* Still show something rather than leaving the launcher looking like
+         * the button press did nothing — this is exactly the manifest typo
+         * (wrong "entry" file name) this task exists to surface. */
+        s_app = app;
+        s_prev_screen = lv_screen_active();
+        s_screen = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(s_screen, lv_color_hex(0x101418), LV_PART_MAIN);
+        lv_obj_remove_flag(s_screen, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *err = lv_label_create(s_screen);
+        lv_obj_set_style_text_color(err, lv_color_hex(0xFFD24A), LV_PART_MAIN);
+        lv_obj_set_width(err, LV_PCT(90));
+        lv_label_set_long_mode(err, LV_LABEL_LONG_WRAP);
+        lv_label_set_text_fmt(err, "Cannot open \"%s\"\n(check \"entry\" in manifest.json)",
+                               app->entry);
+        lv_obj_center(err);
+
+        lv_screen_load(s_screen);
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -456,6 +510,9 @@ esp_err_t widget_open(const app_info_t *app)
     s_every_s = 0;
     s_has_clock = false;
     memset(s_objs, 0, sizeof(s_objs));
+    s_err_buf[0] = '\0';
+    s_err_count = 0;
+    s_err_overflow_reported = false;
 
     s_prev_screen = lv_screen_active();
     s_screen = lv_obj_create(NULL);
@@ -469,21 +526,62 @@ esp_err_t widget_open(const app_info_t *app)
     lv_obj_align(s_status_label, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
     lv_label_set_text(s_status_label, "");
 
-    char *save = NULL;
-    for (char *line = strtok_r(buf, "\r\n", &save); line; line = strtok_r(NULL, "\r\n", &save)) {
+    /* Split on '\n' only (not strtok_r's usual "\r\n" delimiter SET) so that a
+     * genuinely blank line still advances the count — strtok_r collapses runs
+     * of delimiter characters, which would silently throw off every line
+     * number reported after the first blank line in the file. */
+    int line_no = 0;
+    char *p = buf;
+    while (*p) {
+        line_no++;
+        char *line = p;
+        char *nl = strchr(p, '\n');
+        if (nl) {
+            *nl = '\0';
+            p = nl + 1;
+        } else {
+            p += strlen(p);
+        }
+        size_t len = strlen(line);
+        if (len > 0 && line[len - 1] == '\r') {
+            line[len - 1] = '\0';
+        }
         while (*line == ' ' || *line == '\t') {
             line++;
         }
         if (*line == '\0' || *line == '#') {
             continue;
         }
-        parse_line(line);
+        parse_line(line, line_no);
     }
     free(buf);
 
+    if (s_err_count > 0) {
+        if (s_err_count > WIDGET_ERR_SHOWN) {
+            char more[24];
+            snprintf(more, sizeof(more), "\n+%d more", s_err_count - WIDGET_ERR_SHOWN);
+            strncat(s_err_buf, more, sizeof(s_err_buf) - strlen(s_err_buf) - 1);
+        }
+
+        /* A banner, not a corner note: a widget author needs to notice this,
+         * not squint for it. Sits just under the ~16px every ui.jsonl author
+         * is already told to reserve for the global toolbar (shell-navigation.md). */
+        lv_obj_t *err_label = lv_label_create(s_screen);
+        lv_obj_set_style_text_color(err_label, lv_color_hex(0xFFD24A), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(err_label, lv_color_hex(0x402000), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(err_label, LV_OPA_80, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(err_label, 4, LV_PART_MAIN);
+        lv_obj_set_style_text_font(err_label, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_width(err_label, LV_PCT(96));
+        lv_label_set_long_mode(err_label, LV_LABEL_LONG_WRAP);
+        lv_label_set_text_fmt(err_label, "ui.jsonl: %d issue%s\n%s",
+                               s_err_count, s_err_count == 1 ? "" : "s", s_err_buf);
+        lv_obj_align(err_label, LV_ALIGN_TOP_MID, 0, 18);
+    }
+
     lv_screen_load(s_screen);
-    ESP_LOGI(TAG, "opened '%s': %u view(s)%s", app->id, (unsigned)s_nobjs,
-             s_has_clock ? ", clock source" : (s_url[0] ? ", http source" : ", static"));
+    ESP_LOGI(TAG, "opened '%s': %u view(s), %d parse issue(s)%s", app->id, (unsigned)s_nobjs,
+             s_err_count, s_has_clock ? ", clock source" : (s_url[0] ? ", http source" : ", static"));
 
     /* Clock and http are alternatives, not layered — ROADMAP #10 (multiple sources
      * per widget) is not built yet. A manifest declaring both gets the clock,
