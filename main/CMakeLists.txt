@@ -10,6 +10,7 @@ idf_component_register(
         host
         nvs_flash
         esp_lcd
+        app_update
     EMBED_TXTFILES
         "builtin/hello.manifest.json"
         "builtin/hello.ui.jsonl"

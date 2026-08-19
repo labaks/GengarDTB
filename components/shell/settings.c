@@ -7,10 +7,12 @@
 #include "bsp.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_lvgl_port.h"
 #include "esp_system.h"
 #include "lvgl.h"
 #include "net.h"
 #include "nvs.h"
+#include "ota.h"
 #include "shell.h"
 
 static const char *TAG = "settings";
@@ -43,6 +45,8 @@ static lv_obj_t   *s_list;
 static lv_obj_t   *s_brightness_btn;
 static lv_obj_t   *s_tz_btn;
 static lv_obj_t   *s_wifi_btn;
+static lv_obj_t   *s_ota_btn;
+static lv_obj_t   *s_ota_status_label;
 static lv_obj_t   *s_heap_label;
 static lv_timer_t *s_refresh_timer;
 
@@ -335,6 +339,55 @@ static void wifi_clicked(lv_event_t *e)
     s_wifi_timer = lv_timer_create(wifi_setup_tick, 500, NULL);
 }
 
+/* --------------------------------------------------------------------- OTA */
+
+/* Runs on the OTA task, not the LVGL one — must take the lock itself, same
+ * convention as net.c/host.c's own state-change callbacks. Guards against
+ * s_ota_status_label already being gone (settings screen closed mid-update)
+ * by just failing the lock silently; the OTA task itself does not care
+ * whether anyone is listening. */
+static void ota_status_cb(ota_state_t state, int percent, const char *detail)
+{
+    char buf[64];
+    switch (state) {
+    case OTA_CONNECTING:
+        snprintf(buf, sizeof(buf), "OTA: connecting...");
+        break;
+    case OTA_DOWNLOADING:
+        if (detail) {
+            snprintf(buf, sizeof(buf), "OTA: downloading %s...", detail);
+        } else {
+            snprintf(buf, sizeof(buf), "OTA: downloading %d%%", percent);
+        }
+        break;
+    case OTA_DONE:
+        snprintf(buf, sizeof(buf), "OTA: done, rebooting...");
+        break;
+    case OTA_ERROR:
+        snprintf(buf, sizeof(buf), "OTA failed: %s", detail ? detail : "?");
+        break;
+    default:
+        buf[0] = '\0';
+        break;
+    }
+
+    if (lvgl_port_lock(200)) {
+        if (s_ota_status_label) {
+            lv_label_set_text(s_ota_status_label, buf);
+        }
+        lvgl_port_unlock();
+    }
+}
+
+static void ota_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (ota_is_running()) {
+        return;
+    }
+    ota_check_and_update(ota_status_cb);
+}
+
 /* ------------------------------------------------------------------- public */
 
 esp_err_t settings_open(void)
@@ -378,6 +431,11 @@ esp_err_t settings_open(void)
     snprintf(line, sizeof(line), "Firmware: %s", desc->version);
     lv_list_add_text(s_list, line);
 
+    s_ota_btn = lv_list_add_button(s_list, NULL, "Check for update");
+    lv_obj_add_event_cb(s_ota_btn, ota_clicked, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(group, s_ota_btn);
+    s_ota_status_label = lv_list_add_text(s_list, "");
+
     lv_list_add_text(s_list, "Pinned on Home:");
     const size_t n = app_registry_count();
     for (size_t i = 0; i < n; i++) {
@@ -416,6 +474,10 @@ void settings_close(void)
     lv_obj_delete(s_screen);
     s_screen = NULL;
     s_list = NULL;
+    /* An OTA update keeps running on its own task regardless of whether this
+     * screen is open — null this out or ota_status_cb() would write through
+     * a dangling pointer the next time it reports progress. */
+    s_ota_status_label = NULL;
 }
 
 bool settings_is_open(void)

@@ -9,6 +9,7 @@
 
 #include "bsp.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -516,6 +517,21 @@ void app_main(void)
     ESP_ERROR_CHECK(host_init());
 
     ESP_ERROR_CHECK(shell_start(io, panel));
+
+    /* Confirms to the bootloader that this boot is good, cancelling the
+     * rollback-on-crash-loop protection (ROADMAP #17). Must happen after a
+     * boot has actually gone well, and before anything ever calls
+     * ota_check_and_update() again — starting a new OTA download while the
+     * running image is still in the unconfirmed PENDING_VERIFY state is a
+     * hard error (esp_ota_ops.h). Harmless — just logged, not asserted — on
+     * a boot that was never OTA'd into in the first place (esptool flashing
+     * over USB never puts a partition into that state), which is every boot
+     * so far. */
+    const esp_err_t rollback_err = esp_ota_mark_app_valid_cancel_rollback();
+    if (rollback_err != ESP_OK) {
+        ESP_LOGI(TAG, "rollback confirm: %s (normal outside an actual OTA update)",
+                 esp_err_to_name(rollback_err));
+    }
 
     ESP_LOGI(TAG, "boot complete, free heap %lu", (unsigned long)esp_get_free_heap_size());
 

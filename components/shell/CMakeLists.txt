@@ -11,6 +11,7 @@ idf_component_register(
         widget
         net
         host
+        ota
         esp_lcd
         nvs_flash
         esp_app_format
