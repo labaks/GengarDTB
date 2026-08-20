@@ -45,8 +45,10 @@ static const char *TAG = "shell";
 static lv_display_t *s_disp;
 static lv_group_t   *s_group;      /* Full list's focus group (the base/default one) */
 static lv_indev_t   *s_keypad;
-static lv_obj_t     *s_status;       /* left side: clock + input backend, lv_layer_top() */
-static lv_obj_t     *s_status_right; /* right side: wifi + pc, lv_layer_top() */
+static lv_obj_t     *s_status;      /* left side: clock + input backend, lv_layer_top() */
+static lv_obj_t     *s_wifi_icon;    /* right side, glyph: wifi state */
+static lv_obj_t     *s_pc_screen;    /* right side, vector: pc-agent connection */
+static lv_obj_t     *s_pc_stand;
 static bool          s_host_connected;
 
 typedef enum {
@@ -131,21 +133,20 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
  * screen and vanished every time anything else was shown (see
  * docs/shell-navigation.md). Ticks every second so the clock keeps moving,
  * not just on WiFi/host state changes. */
-/* Recolor spans (LV_SYMBOL_WIFI/LV_SYMBOL_DRIVE inline-colored via
- * lv_label_set_recolor) instead of the "wifi ok"/"pc --" text this bar used
- * to show — those words told a user nothing, an icon dimmed to grey for
+/* Colored glyph/icon instead of the "wifi ok"/"pc --" text this bar used to
+ * show — those words told a user nothing, an icon dimmed to grey for
  * "not connected" reads at a glance. Dim grey matches s_status's own text
  * color (0x9aa7b0) so "off" icons blend into the same tone as the clock. */
-#define STATUS_DIM   "9aa7b0"
-#define STATUS_UP    "4caf50"
-#define STATUS_WAIT  "c9a227"
-#define STATUS_AP    "4a90d9"
+#define STATUS_DIM   0x9aa7b0
+#define STATUS_UP    0x4caf50
+#define STATUS_WAIT  0xc9a227
+#define STATUS_AP    0x4a90d9
 
 static void status_refresh(lv_timer_t *timer)
 {
     (void)timer;
 
-    if (!s_status || !s_status_right) {
+    if (!s_status || !s_wifi_icon || !s_pc_screen) {
         return;
     }
 
@@ -158,12 +159,12 @@ static void status_refresh(lv_timer_t *timer)
     }
     lv_label_set_text(s_status, clock_buf);
 
-    static const char *wifi_colors[] = { STATUS_DIM, STATUS_WAIT, STATUS_UP, STATUS_AP };
-    char right[64];
-    snprintf(right, sizeof(right), "#%s %s# #%s %s#",
-             wifi_colors[net_state()], LV_SYMBOL_WIFI,
-             s_host_connected ? STATUS_UP : STATUS_DIM, LV_SYMBOL_DRIVE);
-    lv_label_set_text(s_status_right, right);
+    static const uint32_t wifi_colors[] = { STATUS_DIM, STATUS_WAIT, STATUS_UP, STATUS_AP };
+    lv_obj_set_style_text_color(s_wifi_icon, lv_color_hex(wifi_colors[net_state()]), LV_PART_MAIN);
+
+    const lv_color_t pc_color = lv_color_hex(s_host_connected ? STATUS_UP : STATUS_DIM);
+    lv_obj_set_style_bg_color(s_pc_screen, pc_color, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_pc_stand, pc_color, LV_PART_MAIN);
 }
 
 /* Called from the WiFi event task, so it has to take the LVGL lock itself. */
@@ -839,10 +840,53 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
     lv_obj_align(s_status, LV_ALIGN_LEFT_MID, 6, 0);
     lv_obj_remove_flag(s_status, LV_OBJ_FLAG_CLICKABLE);
 
-    s_status_right = lv_label_create(toolbar);
-    lv_label_set_recolor(s_status_right, true);
-    lv_obj_align(s_status_right, LV_ALIGN_RIGHT_MID, -6, 0);
-    lv_obj_remove_flag(s_status_right, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *status_right = lv_obj_create(toolbar);
+    lv_obj_remove_flag(status_right, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(status_right, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(status_right, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(status_right, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(status_right, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(status_right, 0, LV_PART_MAIN);
+    lv_obj_set_flex_flow(status_right, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(status_right, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(status_right, 8, LV_PART_MAIN);
+    lv_obj_align(status_right, LV_ALIGN_RIGHT_MID, -6, 0);
+
+    s_wifi_icon = lv_label_create(status_right);
+    lv_label_set_text(s_wifi_icon, LV_SYMBOL_WIFI);
+    lv_obj_remove_flag(s_wifi_icon, LV_OBJ_FLAG_CLICKABLE);
+
+    /* pc icon: a small vector monitor (screen + stand), not a font glyph —
+     * no built-in LVGL symbol looks like one (see lv_symbol_def.h) and the
+     * project never embeds custom font/image assets (CLAUDE.md, "Что НЕ
+     * делать"). Same reasoning as the sun icon in settings.c (ROADMAP #31).
+     * A real icon set (ROADMAP #34) is SD-resident by design — fine for app
+     * tiles and weather codes, which already need the card, but wrong for
+     * this: the toolbar is core shell chrome and must render with no card
+     * inserted at all. */
+    lv_obj_t *pc_icon = lv_obj_create(status_right);
+    lv_obj_remove_flag(pc_icon, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(pc_icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(pc_icon, 14, 12);
+    lv_obj_set_style_bg_opa(pc_icon, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(pc_icon, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(pc_icon, 0, LV_PART_MAIN);
+
+    s_pc_screen = lv_obj_create(pc_icon);
+    lv_obj_remove_flag(s_pc_screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_pc_screen, 14, 9);
+    lv_obj_align(s_pc_screen, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_border_width(s_pc_screen, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_pc_screen, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_pc_screen, 0, LV_PART_MAIN);
+
+    s_pc_stand = lv_obj_create(pc_icon);
+    lv_obj_remove_flag(s_pc_stand, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_pc_stand, 6, 3);
+    lv_obj_align(s_pc_stand, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_border_width(s_pc_stand, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_pc_stand, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_pc_stand, 0, LV_PART_MAIN);
 
     build_home_screen();
     build_full_list_screen();
