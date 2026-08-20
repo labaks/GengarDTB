@@ -30,6 +30,9 @@ ctest --test-dir tests\datasource\build --output-on-failure
 Дальше по порядку: план работ в [ROADMAP.md](ROADMAP.md), формат приложений в
 [docs/app-format.md](docs/app-format.md).
 
+**Правило коммитов:** тайтл начинается с номера задачи ROADMAP, например
+`#18. Apps: rescan + delete from device, no reboot`.
+
 ## Что строим
 
 Настольное устройство-помощник: ESP32 + дисплей + кнопки, постоянно под питанием на столе.
