@@ -19,6 +19,7 @@ static const char *TAG = "settings";
 
 #define NVS_NAMESPACE    "deskos"
 #define NVS_KEY_PINNED   "pinned"
+#define NVS_KEY_SHOWCASE "showcase"
 #define PINNED_MAX_LEN   256   /* comma-separated app ids, generous */
 #define PINNED_MAX_APPS  16
 
@@ -174,6 +175,30 @@ size_t settings_pinned_apps(const app_info_t **out, size_t max)
         }
     }
     return count;
+}
+
+/* Read through NVS on every call, same as settings_app_is_pinned() above —
+ * shell.c polls this once a second from showcase_tick(), not per frame, so
+ * the NVS round-trip is negligible and there's no boot-time init to forget. */
+bool settings_showcase_enabled(void)
+{
+    nvs_handle_t h;
+    uint8_t v = 0;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, NVS_KEY_SHOWCASE, &v);
+        nvs_close(h);
+    }
+    return v != 0;
+}
+
+static void settings_set_showcase_enabled(bool enabled)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, NVS_KEY_SHOWCASE, enabled ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
 }
 
 static void pinned_toggle(const char *app_id)
@@ -826,6 +851,16 @@ static void delete_clicked(lv_event_t *e)
     lv_group_focus_obj(cancel_btn);
 }
 
+/* ROADMAP #19: auto-advance through pinned widgets on Home. shell.c owns the
+ * actual cycling (showcase_tick(), polls settings_showcase_enabled() once a
+ * second) — this is just the on/off switch, same lv_switch pattern as the
+ * pin-to-Home toggle below, for the same reason (a colored checkmark is a
+ * contrast judgment call, a toggle isn't). */
+static void showcase_switch_changed(lv_event_t *e)
+{
+    settings_set_showcase_enabled(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+}
+
 static void build_apps(void)
 {
     add_back_row();
@@ -846,6 +881,20 @@ static void build_apps(void)
     }
 
     lv_group_t *group = s_group;
+
+    lv_obj_t *showcase_row = lv_list_add_button(s_list, NULL, NULL);
+    lv_obj_remove_flag(showcase_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *showcase_label = lv_label_create(showcase_row);
+    lv_obj_set_flex_grow(showcase_label, 1);
+    lv_label_set_text(showcase_label, "Showcase mode (auto-advance Home)");
+    lv_obj_t *showcase_sw = lv_switch_create(showcase_row);
+    lv_obj_set_size(showcase_sw, 28, 14);
+    if (settings_showcase_enabled()) {
+        lv_obj_add_state(showcase_sw, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(showcase_sw, showcase_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_group_add_obj(group, showcase_sw);
+
     lv_list_add_text(s_list, "Pinned on Home:");
     const size_t n = app_registry_count();
     for (size_t i = 0; i < n; i++) {

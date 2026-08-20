@@ -64,6 +64,12 @@ static const app_info_t *s_pinned[APP_REGISTRY_MAX];
 static size_t            s_pinned_count;
 static size_t            s_pinned_idx;
 
+/* Showcase mode (ROADMAP #19): auto-advance through pinned widgets on Home
+ * when nobody is looking. Fixed interval, not a Settings-configurable one —
+ * the roadmap only asked for an on/off switch. */
+#define SHOWCASE_INTERVAL_S 15
+static uint16_t s_showcase_elapsed_s;
+
 /* Pending LVGL keys, filled by shell_tick and drained by the keypad read callback.
  * Two-phase: LVGL wants a PRESSED sample followed by a RELEASED one, while our
  * input layer speaks in completed clicks. */
@@ -249,6 +255,7 @@ static void settings_clicked(lv_event_t *e)
 static void show_home(void)
 {
     s_mode = SHELL_HOME;
+    s_showcase_elapsed_s = 0;
     lv_screen_load(s_home_screen);   /* must be active before widget_open() below,
                                        * so its own "previous screen" bookkeeping
                                        * points back here rather than Full list. */
@@ -273,6 +280,26 @@ static void home_step(int dir)
     }
     s_pinned_idx = (size_t)(((int)s_pinned_idx + dir + (int)s_pinned_count) % (int)s_pinned_count);
     widget_open(s_pinned[s_pinned_idx]);   /* closes whatever pinned widget was showing first */
+    /* Re-arms the showcase interval on every step, manual or automatic —
+     * a manual switch (B1/B2) shouldn't get yanked forward again a moment
+     * later just because the auto-advance countdown happened to be about
+     * to fire. */
+    s_showcase_elapsed_s = 0;
+}
+
+/* Ticks once a second (see shell_start()); only steps Home forward while
+ * showcase mode is on, we are actually looking at Home, and there is more
+ * than one pinned widget to cycle through. */
+static void showcase_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (s_mode != SHELL_HOME || s_pinned_count < 2 || !settings_showcase_enabled()) {
+        s_showcase_elapsed_s = 0;
+        return;
+    }
+    if (++s_showcase_elapsed_s >= SHOWCASE_INTERVAL_S) {
+        home_step(+1);
+    }
 }
 
 static void show_full_list(void)
@@ -895,6 +922,7 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
 
     lv_timer_create(shell_tick, 10, NULL);
     lv_timer_create(status_refresh, 1000, NULL);
+    lv_timer_create(showcase_tick, 1000, NULL);
     net_on_state_change(on_net_state);
     host_on_state_change(on_host_state);
 

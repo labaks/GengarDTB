@@ -41,12 +41,17 @@ void settings_brightness_step(int delta);
 
 /* True when app_id is in the pinned-to-Home set. Reads NVS directly, so it
  * is safe to call whether or not the settings screen is currently open —
- * Home (ROADMAP #19, not built yet) will call this to pick what to show. */
+ * Home calls this to pick what to show. */
 bool settings_app_is_pinned(const char *app_id);
 
 /* Pinned apps, in the order they were pinned (not registry order), for Home
  * to cycle through. Returns the count written into out (capped at max). */
 size_t settings_pinned_apps(const app_info_t **out, size_t max);
+
+/* True when showcase mode (ROADMAP #19 — auto-advance through pinned widgets
+ * on Home) is on. Reads NVS directly, same as settings_app_is_pinned() —
+ * shell.c's showcase_tick() polls this once a second. */
+bool settings_showcase_enabled(void);
 
 #ifdef __cplusplus
 }
