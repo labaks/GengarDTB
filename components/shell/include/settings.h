@@ -25,6 +25,20 @@ void settings_close(void);
 
 bool settings_is_open(void);
 
+/* True while the Display brightness row is toggled into "editing" (selected
+ * once, like any other menu row, then B1/B2 step its value instead of
+ * moving focus — see brightness_slider_clicked() in settings.c). shell_tick()
+ * checks this to route raw B1/B2 clicks to settings_brightness_step()
+ * instead of the usual LV_KEY_PREV/NEXT: a KEYPAD-type indev never forwards
+ * those two keys to a focused widget (see lv_indev.c), so there is no other
+ * way to make a slider adjustable by button at all. */
+bool settings_is_adjusting_brightness(void);
+
+/* Steps the backlight by delta (clamped), commits to NVS immediately (each
+ * call is one deliberate button click, not a continuous drag), and updates
+ * the slider to match. A no-op unless the brightness row is in "editing". */
+void settings_brightness_step(int delta);
+
 /* True when app_id is in the pinned-to-Home set. Reads NVS directly, so it
  * is safe to call whether or not the settings screen is currently open —
  * Home (ROADMAP #19, not built yet) will call this to pick what to show. */

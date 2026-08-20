@@ -360,7 +360,7 @@ static void build_full_list_screen(void)
 /* The two layouts differ by more than one binding, so the mapping is chosen from
  * how many buttons are actually wired rather than hardcoded. With only B1 and B2
  * there is no dedicated select key, so B1+B2 becomes ENTER — which in turn
- * displaces brightness and the escape hatch onto long presses. */
+ * displaces the escape hatch onto a long press. */
 static bool three_buttons(void)
 {
     return (input_get_present_mask() & INPUT_B3) != 0;
@@ -371,15 +371,6 @@ static bool is_enter(const input_event_t *ev)
     const bool click = ev->kind == INPUT_EV_CLICK;
     return three_buttons() ? (ev->mask == INPUT_B3 && click)
                             : (ev->mask == (INPUT_B1 | INPUT_B2) && click);
-}
-
-static void step_backlight(void)
-{
-    uint8_t pct = bsp_backlight_get();
-    pct = (pct >= 100) ? 20 : (uint8_t)(pct + 20);
-    bsp_backlight_set(pct);
-    bsp_backlight_save(pct);
-    ESP_LOGI(TAG, "system: backlight %u%%", pct);
 }
 
 /* "Home" is always reachable and always lands on the same place — there is no
@@ -411,7 +402,6 @@ static bool handle_system_chord(const input_event_t *ev)
 {
     const bool longp  = ev->kind == INPUT_EV_LONG_PRESS;
     const bool click  = ev->kind == INPUT_EV_CLICK;
-    const bool repeat = ev->kind == INPUT_EV_HOLD_REPEAT;
 
     /* B1 long is home under BOTH layouts, and is the only route back that a
      * resistive panel can produce — it is single-touch, so no chord is
@@ -437,10 +427,6 @@ static bool handle_system_chord(const input_event_t *ev)
             go_home("chord");
             return true;
         }
-        if (ev->mask == (INPUT_B1 | INPUT_B2) && (click || repeat)) {
-            step_backlight();
-            return true;
-        }
         /* Escape hatch. Non-negotiable: without it a misbehaving widget can
          * lock the user out of their own device. */
         if (ev->mask == INPUT_MASK_ALL && longp) {
@@ -451,10 +437,6 @@ static bool handle_system_chord(const input_event_t *ev)
             return true;
         }
     } else {
-        if (ev->mask == INPUT_B2 && longp) {
-            step_backlight();
-            return true;
-        }
         if (ev->mask == (INPUT_B1 | INPUT_B2) && longp) {
             ESP_LOGW(TAG, "system: force return to launcher");
             widget_close();
@@ -516,12 +498,12 @@ static void shell_tick(lv_timer_t *timer)
          * (e.g. weather's refresh) never fires while it is showing on Home —
          * system navigation wins, same rule as everywhere else.
          *
-         * CLICK only, not HOLD_REPEAT: found on hardware that holding B1 (for
-         * the "go home" long-press) or B2 (for brightness) keeps generating
-         * repeat events for that same bare mask for as long as the button
-         * stays down. Reacting to those here span-cycled through pinned
-         * widgets (each with its own HTTP refetch) for the entire duration of
-         * an unrelated long-press. Plain click has no such follow-on. */
+         * CLICK only, not HOLD_REPEAT: found on hardware that holding a
+         * button (e.g. B1 for the "go home" long-press) keeps generating
+         * repeat events for that same bare mask for as long as it stays
+         * down. Reacting to those here span-cycled through pinned widgets
+         * (each with its own HTTP refetch) for the entire duration of an
+         * unrelated long-press. Plain click has no such follow-on. */
         if (s_mode == SHELL_HOME) {
             const bool click = ev.kind == INPUT_EV_CLICK;
             if (ev.mask == INPUT_B1 && click) {
@@ -530,6 +512,27 @@ static void shell_tick(lv_timer_t *timer)
             }
             if (ev.mask == INPUT_B2 && click) {
                 home_step(+1);
+                continue;
+            }
+        }
+
+        /* Settings' inline brightness slider behaves like an encoder-edited
+         * menu item: selecting it (ENTER, unaffected by anything here) toggles
+         * "editing" in settings.c, and while editing, B1/B2 step its value
+         * instead of moving list focus. CLICK only, not HOLD_REPEAT: a bare
+         * B1 hold is unconditionally "go home" (fires above, on the
+         * LONG_PRESS that precedes any repeat), so holding it to scrub was
+         * never reachable anyway — click-to-step keeps both buttons
+         * symmetric. See settings_is_adjusting_brightness()'s own comment for
+         * why this has to be raw shell_tick routing rather than lv_group. */
+        if (settings_is_adjusting_brightness()) {
+            const bool click = ev.kind == INPUT_EV_CLICK;
+            if (ev.mask == INPUT_B1 && click) {
+                settings_brightness_step(-5);
+                continue;
+            }
+            if (ev.mask == INPUT_B2 && click) {
+                settings_brightness_step(+5);
                 continue;
             }
         }

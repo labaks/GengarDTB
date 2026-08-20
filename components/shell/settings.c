@@ -66,7 +66,7 @@ static lv_timer_t *s_refresh_timer;
  * this screen is up and restores the launcher's group when it closes. */
 static lv_group_t *s_group;
 
-static lv_obj_t   *s_brightness_btn;      /* Display */
+static lv_obj_t   *s_brightness_slider;   /* Display */
 static lv_obj_t   *s_tz_btn;              /* Network */
 static lv_obj_t   *s_wifi_btn;            /* Network */
 static lv_obj_t   *s_ota_btn;             /* About */
@@ -189,21 +189,76 @@ static void pinned_toggle(const char *app_id)
 
 /* -------------------------------------------------------------------- rows */
 
-static void brightness_label_update(void)
+/* Floor at 5, not 0 — 0 turns the backlight fully off with no way to see the
+ * slider any more to drag it back up (recovering needs the unrelated
+ * system-wide backlight chord, or leaving and reopening Settings — still
+ * dark either way). */
+#define BRIGHTNESS_MIN 5
+
+/* Live preview while dragging (bsp_backlight_set, cheap — just a PWM duty
+ * write), one NVS commit on release — not on every VALUE_CHANGED, which
+ * fires continuously mid-drag. Touch-drag path only; button stepping is
+ * settings_brightness_step() below. */
+static void brightness_slider_event(lv_event_t *e)
 {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "Brightness: %u%%", bsp_backlight_get());
-    lv_list_set_button_text(s_list, s_brightness_btn, buf);
+    const uint8_t pct = (uint8_t)lv_slider_get_value(lv_event_get_target(e));
+    if (lv_event_get_code(e) == LV_EVENT_RELEASED) {
+        bsp_backlight_save(pct);
+    } else {
+        bsp_backlight_set(pct);
+    }
 }
 
-static void brightness_clicked(lv_event_t *e)
+/* True while the brightness row is toggled into "editing" — see
+ * brightness_slider_clicked(). Guards against a stale true surviving past
+ * the slider's own destruction (view switch, settings close). */
+static bool s_brightness_editing;
+
+bool settings_is_adjusting_brightness(void)
+{
+    return s_brightness_editing && s_brightness_slider != NULL;
+}
+
+/* CLICK-driven, not touch-drag — same NVS-commit-per-step reasoning as the
+ * original click-to-cycle brightness row this replaced: a click is a
+ * deliberate, infrequent action, not a continuous stream, so committing
+ * every step is fine. */
+void settings_brightness_step(int delta)
+{
+    if (!settings_is_adjusting_brightness()) {
+        return;
+    }
+    int pct = (int)bsp_backlight_get() + delta;
+    if (pct < BRIGHTNESS_MIN) {
+        pct = BRIGHTNESS_MIN;
+    } else if (pct > 100) {
+        pct = 100;
+    }
+    bsp_backlight_set((uint8_t)pct);
+    bsp_backlight_save((uint8_t)pct);
+    lv_slider_set_value(s_brightness_slider, pct, LV_ANIM_OFF);
+}
+
+/* The slider behaves like any other menu row for navigation (B1/B2 move
+ * focus onto/off it via LV_KEY_PREV/NEXT, same as Back or a Full list tile)
+ * but, like a real menu item, needs a "selected" state of its own to become
+ * adjustable — this toggles it. Selecting it (B3 click on 3 buttons, B1+B2
+ * click on 2) always reaches this: LV_KEY_ENTER is delivered to the focused
+ * object regardless of any of this file's own state, and lv_slider treats a
+ * no-coordinate keypad "click" as a plain click, not a jump-to-point (that
+ * needs a POINTER-indev's touch coordinate, which a simulated ENTER press
+ * never carries) — so toggling here never accidentally moves the value. */
+static void brightness_slider_clicked(lv_event_t *e)
 {
     (void)e;
-    uint8_t pct = bsp_backlight_get();
-    pct = (pct >= 100) ? 20 : (uint8_t)(pct + 20);
-    bsp_backlight_set(pct);
-    bsp_backlight_save(pct);
-    brightness_label_update();
+    s_brightness_editing = !s_brightness_editing;
+    if (s_brightness_editing) {
+        lv_obj_set_style_border_width(s_brightness_slider, 2, LV_PART_MAIN);
+        lv_obj_set_style_border_color(s_brightness_slider, lv_color_hex(0xE8B923), LV_PART_MAIN);
+        lv_obj_set_style_border_opa(s_brightness_slider, LV_OPA_COVER, LV_PART_MAIN);
+    } else {
+        lv_obj_set_style_border_width(s_brightness_slider, 0, LV_PART_MAIN);
+    }
 }
 
 /* -1 when the effective TZ is not one of the presets (e.g. straight from
@@ -513,14 +568,75 @@ static void build_about(void)
     s_ota_status_label = lv_list_add_text(s_list, "");
 }
 
+/* LVGL's built-in symbol font (lv_symbol_def.h) has no sun/brightness glyph,
+ * and the project deliberately never embeds custom font or image assets (see
+ * CLAUDE.md, "Что НЕ делать") — so this is drawn from primitives instead of
+ * picked out of an icon set: a small circle plus a horizontal/vertical ray
+ * behind it. A stopgap ahead of ROADMAP #34 (real icon set on SD); swap for
+ * a proper asset there. lv_list_add_button() can't host it — its icon slot
+ * only takes an image/symbol source, not an arbitrary child object — so the
+ * row is built by hand instead, matching what that helper does internally. */
+static void sun_icon_create(lv_obj_t *parent)
+{
+    static const lv_point_precise_t h_ray[] = { { 0, 8 }, { 16, 8 } };
+    static const lv_point_precise_t v_ray[] = { { 8, 0 }, { 8, 16 } };
+    const lv_color_t sun_color = lv_color_hex(0xE8B923);
+
+    lv_obj_t *icon = lv_obj_create(parent);
+    lv_obj_remove_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(icon, 16, 16);
+    lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(icon, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(icon, 0, LV_PART_MAIN);
+
+    lv_obj_t *h = lv_line_create(icon);
+    lv_line_set_points(h, h_ray, 2);
+    lv_obj_set_style_line_color(h, sun_color, LV_PART_MAIN);
+    lv_obj_set_style_line_width(h, 2, LV_PART_MAIN);
+
+    lv_obj_t *v = lv_line_create(icon);
+    lv_line_set_points(v, v_ray, 2);
+    lv_obj_set_style_line_color(v, sun_color, LV_PART_MAIN);
+    lv_obj_set_style_line_width(v, 2, LV_PART_MAIN);
+
+    lv_obj_t *core = lv_obj_create(icon);
+    lv_obj_remove_flag(core, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(core, 8, 8);
+    lv_obj_center(core);
+    lv_obj_set_style_radius(core, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(core, sun_color, LV_PART_MAIN);
+    lv_obj_set_style_border_width(core, 0, LV_PART_MAIN);
+}
+
 static void build_display(void)
 {
     add_back_row();
 
-    s_brightness_btn = lv_list_add_button(s_list, NULL, "");
-    lv_obj_add_event_cb(s_brightness_btn, brightness_clicked, LV_EVENT_CLICKED, NULL);
-    lv_group_add_obj(s_group, s_brightness_btn);
-    brightness_label_update();
+    /* Caption only — no event handler, not added to s_group, so it is not a
+     * focus/click target, just an icon+label for the slider row below it. */
+    lv_obj_t *brightness_row = lv_obj_create(s_list);
+    lv_obj_remove_flag(brightness_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_width(brightness_row, LV_PCT(100));
+    lv_obj_set_height(brightness_row, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(brightness_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(brightness_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_bg_opa(brightness_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(brightness_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(brightness_row, 8, LV_PART_MAIN);
+
+    sun_icon_create(brightness_row);
+    lv_obj_t *brightness_label = lv_label_create(brightness_row);
+    lv_label_set_text(brightness_label, "Brightness");
+
+    s_brightness_editing = false;
+    s_brightness_slider = lv_slider_create(s_list);
+    lv_obj_set_width(s_brightness_slider, LV_PCT(100));
+    lv_slider_set_range(s_brightness_slider, BRIGHTNESS_MIN, 100);
+    lv_slider_set_value(s_brightness_slider, bsp_backlight_get(), LV_ANIM_OFF);
+    lv_obj_add_event_cb(s_brightness_slider, brightness_slider_event, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(s_brightness_slider, brightness_slider_event, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(s_brightness_slider, brightness_slider_clicked, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(s_group, s_brightness_slider);
 }
 
 static void build_network(void)
@@ -581,7 +697,8 @@ static void build_apps(void)
 static void show_view(settings_view_t view)
 {
     lv_obj_clean(s_list);
-    s_brightness_btn = NULL;
+    s_brightness_slider = NULL;
+    s_brightness_editing = false;
     s_tz_btn = NULL;
     s_wifi_btn = NULL;
     s_ota_btn = NULL;
@@ -657,7 +774,8 @@ void settings_close(void)
      * whether this screen (or the About view within it) is open — null
      * s_ota_status_label or ota_status_cb() would write through a dangling
      * pointer the next time it reports progress. */
-    s_brightness_btn = NULL;
+    s_brightness_slider = NULL;
+    s_brightness_editing = false;
     s_tz_btn = NULL;
     s_wifi_btn = NULL;
     s_ota_btn = NULL;
