@@ -17,6 +17,7 @@ extern "C" {
 #endif
 
 #define APP_REGISTRY_MAX      24
+#define APP_REGISTRY_MAX_ERRORS 8
 #define APP_MANIFEST_API_VER  1
 
 /* Capabilities an app must declare up front. The shell uses these to decide what
@@ -68,11 +69,33 @@ typedef struct {
 app_action_t app_registry_action_for(const app_info_t *app, const input_event_t *ev);
 
 /* Rescans the card. Safe to call with no card inserted: yields zero apps and
- * returns ESP_ERR_NOT_FOUND rather than failing the boot. */
+ * returns ESP_ERR_NOT_FOUND rather than failing the boot. Also safe to call
+ * again later, not just at startup (ROADMAP #18) — resets and repopulates
+ * both this list and the error list below. */
 esp_err_t app_registry_scan(void);
 
 size_t              app_registry_count(void);
 const app_info_t   *app_registry_get(size_t index);
+
+/* A manifest.json that existed but failed to load — invalid JSON, empty
+ * file, unrecognized api version. A directory with no manifest.json at all
+ * is not an error (could be anything — a stray folder, work in progress —
+ * so it is silently skipped, not recorded here). Reset on every
+ * app_registry_scan(). */
+size_t app_registry_error_count(void);
+
+/* dir_out/reason_out are always null-terminated. Returns false (and leaves
+ * both untouched) if index is out of range. */
+bool app_registry_get_error(size_t index, char *dir_out, size_t dir_sz,
+                             char *reason_out, size_t reason_sz);
+
+/* Deletes an SD-card app's entire directory (manifest.json, its entry file,
+ * any .cache.json) permanently — no confirmation, no undo, that is the
+ * caller's job. Refuses a built-in app (lives under BSP_FS_MOUNT_POINT,
+ * re-extracted from firmware at every boot regardless — deleting it would
+ * just be undone on the next reboot). Does not rescan; call
+ * app_registry_scan() afterward to make the change visible. */
+esp_err_t app_registry_delete(const char *app_id);
 
 /* True when the app can do anything useful right now. An app declaring
  * APP_CAP_HOST is "degraded", not hidden, while the PC agent is away. */

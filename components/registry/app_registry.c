@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "bsp.h"
 #include "cJSON.h"
@@ -14,6 +15,25 @@ static const char *TAG = "registry";
 
 static app_info_t s_apps[APP_REGISTRY_MAX];
 static size_t     s_count;
+
+typedef struct {
+    char dir_name[32];
+    char reason[48];
+} app_scan_error_t;
+
+static app_scan_error_t s_errors[APP_REGISTRY_MAX_ERRORS];
+static size_t           s_error_count;
+
+static void record_error(const char *dir_name, const char *reason)
+{
+    if (s_error_count >= APP_REGISTRY_MAX_ERRORS) {
+        ESP_LOGW(TAG, "error list full, dropping: %s: %s", dir_name, reason);
+        return;
+    }
+    app_scan_error_t *e = &s_errors[s_error_count++];
+    snprintf(e->dir_name, sizeof(e->dir_name), "%s", dir_name);
+    snprintf(e->reason, sizeof(e->reason), "%s", reason);
+}
 
 static uint32_t parse_caps(const cJSON *arr)
 {
@@ -107,6 +127,7 @@ static bool load_manifest(const char *root_dir, const char *dir_name, app_info_t
     fclose(f);
     if (n == 0) {
         ESP_LOGW(TAG, "%s: empty manifest", dir_name);
+        record_error(dir_name, "empty manifest");
         return false;
     }
     buf[n] = '\0';
@@ -114,6 +135,7 @@ static bool load_manifest(const char *root_dir, const char *dir_name, app_info_t
     cJSON *root = cJSON_Parse(buf);
     if (!root) {
         ESP_LOGW(TAG, "%s: manifest is not valid JSON", dir_name);
+        record_error(dir_name, "invalid JSON");
         return false;
     }
 
@@ -124,6 +146,9 @@ static bool load_manifest(const char *root_dir, const char *dir_name, app_info_t
          * a future manifest must not be half-interpreted by an old shell. */
         ESP_LOGW(TAG, "%s: manifest api %d, shell speaks %d — skipped",
                  dir_name, api, APP_MANIFEST_API_VER);
+        char reason[48];
+        snprintf(reason, sizeof(reason), "api %d, shell speaks %d", api, APP_MANIFEST_API_VER);
+        record_error(dir_name, reason);
         goto done;
     }
 
@@ -174,6 +199,7 @@ static void scan_root(const char *root_dir)
 esp_err_t app_registry_scan(void)
 {
     s_count = 0;
+    s_error_count = 0;
 
     /* Built-ins live in internal flash so the device is useful with no card at
      * all; the card is scanned second and simply adds to the list. Both go
@@ -226,4 +252,74 @@ bool app_registry_is_available(const app_info_t *app, bool host_connected)
         return host_connected;
     }
     return true;
+}
+
+size_t app_registry_error_count(void)
+{
+    return s_error_count;
+}
+
+bool app_registry_get_error(size_t index, char *dir_out, size_t dir_sz,
+                             char *reason_out, size_t reason_sz)
+{
+    if (index >= s_error_count) {
+        return false;
+    }
+    snprintf(dir_out, dir_sz, "%s", s_errors[index].dir_name);
+    snprintf(reason_out, reason_sz, "%s", s_errors[index].reason);
+    return true;
+}
+
+esp_err_t app_registry_delete(const char *app_id)
+{
+    const app_info_t *app = NULL;
+    for (size_t i = 0; i < s_count; i++) {
+        if (strcmp(s_apps[i].id, app_id) == 0) {
+            app = &s_apps[i];
+            break;
+        }
+    }
+    if (!app) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    /* Built-ins are re-extracted from firmware at every boot (see main.c) —
+     * deleting one would just be undone on the next reboot, so refuse rather
+     * than silently do nothing useful. */
+    if (strncmp(app->dir, BSP_SD_MOUNT_POINT, strlen(BSP_SD_MOUNT_POINT)) != 0) {
+        ESP_LOGW(TAG, "%s: refusing to delete a built-in app (%s)", app_id, app->dir);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    DIR *d = opendir(app->dir);
+    if (!d) {
+        return ESP_FAIL;
+    }
+    const struct dirent *ent = NULL;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') {
+            continue;
+        }
+        char path[350];
+        snprintf(path, sizeof(path), "%s/%s", app->dir, ent->d_name);
+        struct stat st;
+        /* App directories are documented flat (manifest.json, the entry
+         * file, .cache.json) — no real case makes a subdirectory, so this is
+         * a defensive skip, not a recursive delete. */
+        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            ESP_LOGW(TAG, "%s: skipping unexpected subdirectory '%s'", app_id, ent->d_name);
+            continue;
+        }
+        if (unlink(path) != 0) {
+            ESP_LOGW(TAG, "%s: failed to remove '%s'", app_id, path);
+        }
+    }
+    closedir(d);
+
+    if (rmdir(app->dir) != 0) {
+        ESP_LOGW(TAG, "%s: rmdir '%s' failed (not empty?)", app_id, app->dir);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "%s: deleted from %s", app_id, app->dir);
+    return ESP_OK;
 }

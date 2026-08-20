@@ -82,6 +82,19 @@ static lv_obj_t   *s_wifi_status_label;
 static lv_timer_t *s_wifi_timer;
 static uint8_t     s_wifi_settle_ticks;
 
+/* Delete-confirm sub-panel (ROADMAP #18) — same swap-in-over-the-list
+ * pattern as the WiFi panel above, torn down the same three ways. Only ever
+ * opened from the Apps view. s_delete_app_id is a copy, not the app_info_t
+ * pointer itself: that pointer lives inside the registry's own array and
+ * app_registry_delete() + the rescan after it can invalidate it. */
+static lv_obj_t *s_delete_panel;
+static char      s_delete_app_id[24];
+/* The trash button that opened the panel — restored to focus on Cancel (see
+ * delete_panel_close()'s own comment for why this can't be left to LVGL). On
+ * a confirmed delete this row is about to be destroyed by show_view()'s
+ * rebuild anyway, so refocusing it there is harmless, just momentarily moot. */
+static lv_obj_t *s_delete_trigger_btn;
+
 /* ---------------------------------------------------------------- pinned set */
 
 static void pinned_read_raw(char *out, size_t out_size)
@@ -292,19 +305,21 @@ static void tz_clicked(lv_event_t *e)
     tz_label_update();
 }
 
-static void pin_row_set_text(lv_obj_t *btn, const app_info_t *app)
-{
-    char buf[48];
-    snprintf(buf, sizeof(buf), "%s  %s",
-             settings_app_is_pinned(app->id) ? LV_SYMBOL_OK : " ", app->name);
-    lv_list_set_button_text(s_list, btn, buf);
-}
-
-static void pin_clicked(lv_event_t *e)
+/* lv_switch instead of a colored checkmark — the checkmark attempt (see git
+ * history) read as "selected" rather than "off/dim", and the pinned one's
+ * white was unreadable against the row's own focus highlight. A toggle needs
+ * no color judgment call: on/off is its whole job. The switch's own click
+ * handling flips LV_STATE_CHECKED itself before this fires; this only
+ * mirrors that into NVS, and only if it actually disagrees with what is
+ * already stored (defensive, not load-bearing — a genuine single click
+ * always disagrees). */
+static void pin_switch_changed(lv_event_t *e)
 {
     const app_info_t *app = lv_event_get_user_data(e);
-    pinned_toggle(app->id);
-    pin_row_set_text(lv_event_get_target(e), app);
+    const bool checked = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    if (checked != settings_app_is_pinned(app->id)) {
+        pinned_toggle(app->id);
+    }
 }
 
 /* Keeps the WiFi row live while the Network view sits open and idle:
@@ -678,19 +693,211 @@ static void build_storage(void)
     s_heap_label = lv_list_add_text(s_list, "");
 }
 
+/* The actual scan (blocking SD card I/O — main.c's own boot-time call is not
+ * instant either) runs one timer tick after the click, not inside it: this
+ * lets LVGL paint the spinner added below first. Doing the scan straight in
+ * rescan_clicked() would block the same task that draws the spinner, so the
+ * spinner (and the click itself) would never visibly render before the scan
+ * had already finished — found on hardware as "nothing happens on click". */
+static void rescan_do(lv_timer_t *timer)
+{
+    (void)timer;
+    app_registry_scan();
+    shell_refresh_app_list();
+    show_view(VIEW_APPS);
+}
+
+static void rescan_clicked(lv_event_t *e)
+{
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_list_set_button_text(s_list, btn, "Scanning...");
+    lv_obj_add_state(btn, LV_STATE_DISABLED);   /* one rescan at a time */
+
+    lv_obj_t *spinner = lv_spinner_create(btn);
+    lv_obj_set_size(spinner, 16, 16);
+    lv_obj_align(spinner, LV_ALIGN_RIGHT_MID, -4, 0);
+    lv_obj_remove_flag(spinner, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_timer_t *t = lv_timer_create(rescan_do, 30, NULL);
+    lv_timer_set_repeat_count(t, 1);
+}
+
+/* Deleting s_delete_panel removes its focused button (Cancel or Delete) from
+ * s_group, and LVGL's own auto-refocus-on-removal runs at that exact moment
+ * — while s_list is still hidden, since the unhide below hasn't happened
+ * yet — so it walks the whole group, finds every candidate hidden (a hidden
+ * object never receives focus, see lv_group.c), and gives up with no focus
+ * at all. Found on hardware as "list navigation dead after Cancel": nothing
+ * was focused any more for B1/B2 to move away from. Explicitly refocusing
+ * the trash button that opened this panel, now that s_list is visible
+ * again, is the fix. */
+static void delete_panel_close(void)
+{
+    if (!s_delete_panel) {
+        return;
+    }
+    lv_obj_delete(s_delete_panel);
+    s_delete_panel = NULL;
+    lv_obj_remove_flag(s_list, LV_OBJ_FLAG_HIDDEN);
+    if (s_delete_trigger_btn) {
+        lv_group_focus_obj(s_delete_trigger_btn);
+        s_delete_trigger_btn = NULL;
+    }
+}
+
+static void delete_cancel_clicked(lv_event_t *e)
+{
+    (void)e;
+    delete_panel_close();
+}
+
+static void delete_confirm_clicked(lv_event_t *e)
+{
+    (void)e;
+    app_registry_delete(s_delete_app_id);
+    app_registry_scan();
+    shell_refresh_app_list();
+    delete_panel_close();
+    show_view(VIEW_APPS);
+}
+
+static void delete_clicked(lv_event_t *e)
+{
+    const app_info_t *app = lv_event_get_user_data(e);
+    if (s_delete_panel) {
+        return;
+    }
+    snprintf(s_delete_app_id, sizeof(s_delete_app_id), "%s", app->id);
+    s_delete_trigger_btn = lv_event_get_target(e);
+
+    lv_obj_add_flag(s_list, LV_OBJ_FLAG_HIDDEN);
+
+    s_delete_panel = lv_obj_create(s_screen);
+    lv_obj_set_size(s_delete_panel, BSP_LCD_H_RES - 24, BSP_LCD_V_RES - 24 - SHELL_TOOLBAR_HEIGHT);
+    lv_obj_align(s_delete_panel, LV_ALIGN_BOTTOM_MID, 0, -6);
+    lv_obj_set_flex_flow(s_delete_panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(s_delete_panel, 12, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(s_delete_panel, 10, LV_PART_MAIN);
+
+    char msg[96];
+    snprintf(msg, sizeof(msg), "Delete '%s'? This cannot be undone.", app->name);
+    lv_obj_t *msg_lbl = lv_label_create(s_delete_panel);
+    lv_obj_set_width(msg_lbl, LV_PCT(100));
+    lv_obj_set_flex_grow(msg_lbl, 1);   /* pushes btn_row down to the panel's bottom edge */
+    lv_label_set_long_mode(msg_lbl, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(msg_lbl, msg);
+
+    /* Cancel and Delete side by side, right-aligned within their own row —
+     * the panel's own COLUMN flow can't right-align one child without also
+     * right-aligning msg_lbl above it, so the row handles its own alignment
+     * instead of relying on the panel's. */
+    lv_obj_t *btn_row = lv_obj_create(s_delete_panel);
+    lv_obj_remove_flag(btn_row, LV_OBJ_FLAG_SCROLLABLE);
+    /* The focused button's own outline draws a few px past its edge — with
+     * btn_row sized tight to content (LV_SIZE_CONTENT, zero padding) and
+     * LVGL's default child clipping, that outline was getting cut off at
+     * btn_row's own bounds. OVERFLOW_VISIBLE lets it draw past them. */
+    lv_obj_add_flag(btn_row, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_set_width(btn_row, LV_PCT(100));
+    lv_obj_set_height(btn_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(btn_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(btn_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(btn_row, 0, LV_PART_MAIN);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(btn_row, 8, LV_PART_MAIN);
+
+    lv_obj_t *cancel_btn = lv_button_create(btn_row);
+    lv_obj_t *cancel_lbl = lv_label_create(cancel_btn);
+    lv_label_set_text(cancel_lbl, "Cancel");
+    lv_obj_add_event_cb(cancel_btn, delete_cancel_clicked, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(s_group, cancel_btn);
+
+    lv_obj_t *confirm_btn = lv_button_create(btn_row);
+    lv_obj_set_style_bg_color(confirm_btn, lv_color_hex(0xC0392B), LV_PART_MAIN);
+    lv_obj_t *confirm_lbl = lv_label_create(confirm_btn);
+    lv_label_set_text(confirm_lbl, "Delete");
+    lv_obj_add_event_cb(confirm_btn, delete_confirm_clicked, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(s_group, confirm_btn);
+
+    /* Default focus to the safe choice — unlike the WiFi panel above, this
+     * one is destructive, so it is worth the one extra call rather than
+     * leaving focus wherever it happened to sit before the panel opened. */
+    lv_group_focus_obj(cancel_btn);
+}
+
 static void build_apps(void)
 {
     add_back_row();
+
+    lv_obj_t *rescan_btn = lv_list_add_button(s_list, LV_SYMBOL_REFRESH, "Rescan SD card");
+    lv_obj_add_event_cb(rescan_btn, rescan_clicked, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(s_group, rescan_btn);
+
+    /* A manifest.json that failed to load (ROADMAP #18) — a directory with
+     * no manifest.json at all is not reported here, see app_registry.h. */
+    const size_t err_n = app_registry_error_count();
+    for (size_t i = 0; i < err_n; i++) {
+        char dir[32], reason[48], line[96];
+        app_registry_get_error(i, dir, sizeof(dir), reason, sizeof(reason));
+        snprintf(line, sizeof(line), "%s %s: %s", LV_SYMBOL_WARNING, dir, reason);
+        lv_obj_t *warn = lv_list_add_text(s_list, line);
+        lv_obj_set_style_text_color(warn, lv_color_hex(0xc9a227), LV_PART_MAIN);
+    }
 
     lv_group_t *group = s_group;
     lv_list_add_text(s_list, "Pinned on Home:");
     const size_t n = app_registry_count();
     for (size_t i = 0; i < n; i++) {
         const app_info_t *app = app_registry_get(i);
-        lv_obj_t *btn = lv_list_add_button(s_list, NULL, "");
-        lv_obj_add_event_cb(btn, pin_clicked, LV_EVENT_CLICKED, (void *)app);
-        lv_group_add_obj(group, btn);
-        pin_row_set_text(btn, app);
+
+        /* A real list button, same as every other row on this screen (Back,
+         * Rescan, TZ, WiFi...) — a hand-built container here (tried once,
+         * see git history) picks up none of the list's flat row styling and
+         * just looks like a floating rounded box. txt is NULL, not the app
+         * name: that would insert an auto-created label as child 0, ahead of
+         * the switch this row needs first. Not clickable itself any more,
+         * either — it is just a row container now; the switch, name label,
+         * and (for SD apps) the trash button are the real, independent click
+         * targets, added by hand in that order. None of them bubbles a click
+         * up to the row (LVGL only bubbles on request), so they stay
+         * independent of each other too. */
+        lv_obj_t *row = lv_list_add_button(s_list, NULL, NULL);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
+
+        lv_obj_t *pin_sw = lv_switch_create(row);
+        lv_obj_set_size(pin_sw, 28, 14);   /* the default switch dwarfs a 14px row */
+        if (settings_app_is_pinned(app->id)) {
+            lv_obj_add_state(pin_sw, LV_STATE_CHECKED);
+        }
+        lv_obj_add_event_cb(pin_sw, pin_switch_changed, LV_EVENT_VALUE_CHANGED, (void *)app);
+        lv_group_add_obj(group, pin_sw);
+
+        lv_obj_t *name_lbl = lv_label_create(row);
+        lv_obj_set_flex_grow(name_lbl, 1);
+        lv_label_set_text(name_lbl, app->name);
+
+        /* Built-ins are re-extracted from firmware at every boot — deleting
+         * one would just be undone on the next reboot, so no trash button. */
+        const bool deletable = strncmp(app->dir, BSP_SD_MOUNT_POINT, strlen(BSP_SD_MOUNT_POINT)) == 0;
+        if (deletable) {
+            /* No background/border of its own — just a red glyph — and sized
+             * to the glyph alone (LV_SIZE_CONTENT + zero padding) rather
+             * than a default button's box, so it does not stretch the row
+             * taller than the name label next to it. */
+            lv_obj_t *del_btn = lv_button_create(row);
+            lv_obj_set_size(del_btn, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_obj_set_style_bg_opa(del_btn, LV_OPA_TRANSP, LV_PART_MAIN);
+            lv_obj_set_style_border_width(del_btn, 0, LV_PART_MAIN);
+            lv_obj_set_style_shadow_width(del_btn, 0, LV_PART_MAIN);
+            lv_obj_set_style_pad_all(del_btn, 0, LV_PART_MAIN);
+            lv_obj_set_style_radius(del_btn, 0, LV_PART_MAIN);   /* square focus outline */
+            lv_obj_t *del_lbl = lv_label_create(del_btn);
+            lv_label_set_text(del_lbl, LV_SYMBOL_TRASH);
+            lv_obj_set_style_text_color(del_lbl, lv_color_hex(0xC0392B), LV_PART_MAIN);
+            lv_obj_add_event_cb(del_btn, delete_clicked, LV_EVENT_CLICKED, (void *)app);
+            lv_group_add_obj(group, del_btn);
+        }
     }
 }
 
@@ -734,6 +941,9 @@ esp_err_t settings_open(void)
     s_list = lv_list_create(s_screen);
     lv_obj_set_size(s_list, BSP_LCD_H_RES - 12, BSP_LCD_V_RES - 12 - SHELL_TOOLBAR_HEIGHT);
     lv_obj_align(s_list, LV_ALIGN_BOTTOM_MID, 0, -6);
+    /* Without this the last row (Apps' taller switch+trash rows especially)
+     * sits flush against the list's own bottom edge and reads as clipped. */
+    lv_obj_set_style_pad_bottom(s_list, 8, LV_PART_MAIN);
 
     if (!s_group) {
         s_group = lv_group_create();
@@ -758,6 +968,11 @@ void settings_close(void)
     if (s_wifi_panel) {
         wifi_setup_close(true);
     }
+    /* Same reasoning — the escape hatch must not leave the screen showing a
+     * delete-confirm panel over an s_screen that is about to be torn down. */
+    if (s_delete_panel) {
+        delete_panel_close();
+    }
     if (s_refresh_timer) {
         lv_timer_delete(s_refresh_timer);
         s_refresh_timer = NULL;
@@ -781,6 +996,7 @@ void settings_close(void)
     s_ota_btn = NULL;
     s_ota_status_label = NULL;
     s_heap_label = NULL;
+    s_delete_trigger_btn = NULL;
 }
 
 bool settings_is_open(void)

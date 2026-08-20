@@ -38,6 +38,12 @@ lv_group_t *shell_input_group(void);
  * restore Full list's own group. */
 void shell_set_input_group(lv_group_t *group);
 
+/* Rebuilds Full list's tiles from the current app registry contents. Call
+ * after app_registry_scan() (a manual rescan or a delete, ROADMAP #18) so a
+ * change on the SD card shows up without a reboot. Safe to call whether or
+ * not Full list is the screen currently on display. */
+void shell_refresh_app_list(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -299,16 +299,15 @@ static void build_home_screen(void)
 
 /* A grid of tiles instead of the old vertical list — same primitives
  * (lv_button + lv_label), just wrapped instead of stacked. No icons: there is
- * no image asset pipeline yet (ROADMAP #28), so a tile is its app name. */
-static void build_full_list_screen(void)
+ * no image asset pipeline yet (ROADMAP #28), so a tile is its app name.
+ *
+ * Split from screen creation so a rescan (ROADMAP #18) can rebuild the tiles
+ * in place: lv_obj_clean() below deletes every existing tile, which LVGL
+ * itself deregisters from s_group as each one is deleted — no manual
+ * bookkeeping needed before repopulating. */
+static void populate_full_list(void)
 {
-    s_full_list_screen = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(s_full_list_screen, lv_color_hex(0x101418), LV_PART_MAIN);
-    lv_obj_set_flex_flow(s_full_list_screen, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_style_pad_all(s_full_list_screen, 8, LV_PART_MAIN);
-    lv_obj_set_style_pad_top(s_full_list_screen, SHELL_TOOLBAR_HEIGHT + 4, LV_PART_MAIN);   /* room for the toolbar */
-    lv_obj_set_style_pad_row(s_full_list_screen, 8, LV_PART_MAIN);
-    lv_obj_set_style_pad_column(s_full_list_screen, 8, LV_PART_MAIN);
+    lv_obj_clean(s_full_list_screen);
 
     const size_t n = app_registry_count();
     if (n == 0) {
@@ -353,6 +352,26 @@ static void build_full_list_screen(void)
     lv_obj_center(settings_lbl);
     lv_obj_add_event_cb(settings_tile, settings_clicked, LV_EVENT_CLICKED, NULL);
     lv_group_add_obj(s_group, settings_tile);
+}
+
+static void build_full_list_screen(void)
+{
+    s_full_list_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_full_list_screen, lv_color_hex(0x101418), LV_PART_MAIN);
+    lv_obj_set_flex_flow(s_full_list_screen, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_style_pad_all(s_full_list_screen, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(s_full_list_screen, SHELL_TOOLBAR_HEIGHT + 4, LV_PART_MAIN);   /* room for the toolbar */
+    lv_obj_set_style_pad_row(s_full_list_screen, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(s_full_list_screen, 8, LV_PART_MAIN);
+    populate_full_list();
+}
+
+/* Settings' Apps view (ROADMAP #18) calls this after app_registry_scan() so
+ * a rescan or a delete shows up on Full list without a reboot. Safe to call
+ * whether or not Full list is the screen currently on display. */
+void shell_refresh_app_list(void)
+{
+    populate_full_list();
 }
 
 /* ------------------------------------------------------------ system chords */
