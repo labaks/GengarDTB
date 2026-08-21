@@ -334,6 +334,90 @@ static void build_home_screen(void)
  * in place: lv_obj_clean() below deletes every existing tile, which LVGL
  * itself deregisters from s_group as each one is deleted — no manual
  * bookkeeping needed before repopulating. */
+
+/* ROADMAP #35. A user app's dir is already on SD, so its icon travels with
+ * it at <dir>/icon.bin (docs/app-format.md's own convention). A builtin
+ * app's dir is always /fs/apps/<id> — flash — and icons must not live there
+ * (CLAUDE.md, "Что НЕ делать"; same reasoning as widget.c's image_apply()
+ * fix in ROADMAP #34), so builtins instead look at a fixed shared spot on
+ * the card. Returns false (and leaves out untouched) if no such file
+ * exists — a missing icon degrades to "tile has no icon", not an error. */
+static bool tile_icon_path(const char *app_dir, const char *app_id, char *out, size_t out_size)
+{
+    if (strncmp(app_dir, BSP_SD_MOUNT_POINT, strlen(BSP_SD_MOUNT_POINT)) == 0) {
+        snprintf(out, out_size, "%s/icon.bin", app_dir);
+    } else {
+        snprintf(out, out_size, "%s/icons/apps/%s.bin", BSP_SD_MOUNT_POINT, app_id);
+    }
+    FILE *f = fopen(out, "rb");
+    if (!f) {
+        return false;
+    }
+    fclose(f);
+    return true;
+}
+
+/* Tile icons are plain black-on-transparent art (see tools/icon_convert.py)
+ * recolored here to the theme's own text color — NOT the accent
+ * (LV_PALETTE_DEEP_PURPLE): a focused tile's outline uses that same accent
+ * (LVGL default theme's outline_primary on FOCUS_KEY), and an accent-
+ * colored icon on an accent-colored focus ring reads as "no icon at all"
+ * (found on hardware). Text color is guaranteed to contrast against the
+ * card color in both themes, which is the only thing this actually needs. */
+static void add_tile_icon(lv_obj_t *tile, const char *icon_path)
+{
+    char src[192];
+    snprintf(src, sizeof(src), "A:%s", icon_path);
+
+    lv_obj_t *icon = lv_image_create(tile);
+    lv_image_set_src(icon, src);
+    lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_image_recolor(icon, shell_theme_text(), LV_PART_MAIN);
+    lv_obj_set_style_image_recolor_opa(icon, LV_OPA_COVER, LV_PART_MAIN);
+}
+
+/* LVGL's default theme fills every plain lv_button with the accent color
+ * (color_primary — Gengar purple, ROADMAP #32) even at rest, not just on
+ * press/focus (lv_theme_default.c: bg_color_primary is added at state 0).
+ * Fine for a single call-to-action button (OTA's "Check for update"), but a
+ * grid of tiles all doing that reads as a wall of solid purple boxes, not
+ * icons — by request, stripped back to just the icon/label. The focus
+ * outline (outline_primary, also accent-colored) is untouched: navigating
+ * the grid by button still needs a visible "you are here". */
+/* Every tile reserves the same label height — exactly two lines of the
+ * default font — regardless of whether its own text needs one line or two
+ * (ROADMAP #35 flagged this at design time: "перенос на вторую строку с
+ * фиксированной высотой блока текста... чтобы сетка оставалась ровной").
+ * Without it, a tile whose name wraps to two lines (long name, or the
+ * "(unavailable)" degraded suffix) grew a taller label than its neighbours,
+ * and since the tile centers its children as one flex block, that pushed
+ * the icon up out of line with every other tile's icon — found on hardware
+ * once real icons made the misalignment obvious. Top-aligned by leaving the
+ * label's own valign alone: LVGL labels start at the top of their box, so a
+ * one-line name just leaves the second line's worth of space blank below
+ * it rather than centering — an even icon row matters more here than a
+ * perfectly centered one-line caption. */
+static void style_tile_label(lv_obj_t *lbl, const char *text)
+{
+    lv_obj_set_width(lbl, LV_PCT(100));
+    lv_obj_set_height(lbl, lv_font_get_line_height(LV_FONT_DEFAULT) * 2);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_label_set_text(lbl, text);
+}
+
+static lv_obj_t *create_tile(void)
+{
+    lv_obj_t *tile = lv_button_create(s_full_list_screen);
+    lv_obj_set_size(tile, 92, 64);
+    lv_obj_set_style_bg_opa(tile, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(tile, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_pad_top(tile, 14, LV_PART_MAIN);
+    lv_obj_set_flex_flow(tile, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(tile, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    return tile;
+}
+
 static void populate_full_list(void)
 {
     lv_obj_clean(s_full_list_screen);
@@ -358,14 +442,15 @@ static void populate_full_list(void)
             snprintf(label, sizeof(label), "%s\n(unavailable)", app->name);
         }
 
-        lv_obj_t *tile = lv_button_create(s_full_list_screen);
-        lv_obj_set_size(tile, 92, 64);
+        lv_obj_t *tile = create_tile();
+
+        char icon_path[192];
+        if (tile_icon_path(app->dir, app->id, icon_path, sizeof(icon_path))) {
+            add_tile_icon(tile, icon_path);
+        }
+
         lv_obj_t *lbl = lv_label_create(tile);
-        lv_obj_set_width(lbl, LV_PCT(100));
-        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
-        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-        lv_label_set_text(lbl, label);
-        lv_obj_center(lbl);
+        style_tile_label(lbl, label);
 
         lv_obj_add_event_cb(tile, app_clicked, LV_EVENT_CLICKED, (void *)app);
         lv_group_add_obj(s_group, tile);
@@ -374,11 +459,18 @@ static void populate_full_list(void)
     /* Settings is not from the registry — a fixed tile the shell always adds
      * itself (see docs/shell-navigation.md). Always present, even with zero
      * apps/no card, so it stays reachable in every state. */
-    lv_obj_t *settings_tile = lv_button_create(s_full_list_screen);
-    lv_obj_set_size(settings_tile, 92, 64);
+    lv_obj_t *settings_tile = create_tile();
+
+    char settings_icon_path[64];
+    snprintf(settings_icon_path, sizeof(settings_icon_path), "%s/icons/apps/settings.bin", BSP_SD_MOUNT_POINT);
+    FILE *sf = fopen(settings_icon_path, "rb");
+    if (sf) {
+        fclose(sf);
+        add_tile_icon(settings_tile, settings_icon_path);
+    }
+
     lv_obj_t *settings_lbl = lv_label_create(settings_tile);
-    lv_label_set_text(settings_lbl, "Settings");
-    lv_obj_center(settings_lbl);
+    style_tile_label(settings_lbl, "Settings");
     lv_obj_add_event_cb(settings_tile, settings_clicked, LV_EVENT_CLICKED, NULL);
     lv_group_add_obj(s_group, settings_tile);
 }
@@ -445,6 +537,13 @@ void shell_apply_theme(bool dark)
     }
     if (s_full_list_screen) {
         lv_obj_set_style_bg_color(s_full_list_screen, bg, LV_PART_MAIN);
+        /* Tile icons are recolored with a local style override (see
+         * add_tile_icon()), which — same as this function's own screen
+         * backgrounds — a theme re-init does not touch on its own. Rebuilding
+         * the tiles is the cheap way to keep them in step with a live theme
+         * toggle instead of leaving yesterday's color on screen until the
+         * next rescan/fetch happens to rebuild them anyway. */
+        populate_full_list();
     }
 }
 

@@ -1,11 +1,16 @@
-# Icons (ROADMAP #34)
+# Icons (ROADMAP #34, #35)
 
 Not compiled into firmware — CLAUDE.md, "Что НЕ делать" is explicit that
 assets stay off flash. Everything under this directory is a *build artifact
 tracked for convenience*; the files that actually matter at runtime live on
-the microSD card, copied there by hand (same workflow as `/sd/wifi.json`,
-`/sd/agent.json`, `/sd/ota.json` — there is no on-device path that writes to
-the card, so this is always a manual step).
+the microSD card. Getting them there no longer has to mean a physical card
+swap: `components/fetch` (ROADMAP #34) reads `/sd/fetch.json` and downloads
+whatever it points at straight onto the card over WiFi. That file itself is
+still a one-time manual write (same as `/sd/wifi.json`/`/sd/agent.json`) —
+but the recommended shape is `{"manifest_url":"http://<pc-ip>:8000/fetch.json.example"}`
+(see that file below), so the *card* only gets touched once ever; every
+later batch of icons is just re-serving an updated JSON file from the PC and
+pressing Settings → Apps → "Fetch to SD card".
 
 ## weather/
 
@@ -54,8 +59,41 @@ can still point at an SD-only icon — see that function's comment.
 | 95 | isolated_thunderstorms |
 | 96, 99 | thunderstorms |
 
-Not done here, left to ROADMAP #35: a matching set of app-tile icons
-(Full list grid, including Settings) — deliberately not picked yet, since
-the right sizing/style call is easier to make once #35 is actually being
-built, and the license question needs a properly open-licensed set (e.g.
-Material Symbols, Apache 2.0), unlike the weather set above.
+## apps/
+
+Full list tile icons + the Settings tile (ROADMAP #35). Source: [Material
+Symbols](https://github.com/google/material-design-icons) (Apache 2.0 —
+an actually open license, unlike weather/ above), outlined style, 48px
+source SVGs, converted at 24×24 (see `tools/icon_convert.py` — same
+pipeline, no gradients to flatten this time, these are plain single-color
+glyphs). Recolored at render time to the shell's current text color
+(`shell_theme_text()` in `components/shell/shell.c`), not baked in — found
+on hardware that tinting them the same accent color as the LVGL theme
+(`LV_PALETTE_DEEP_PURPLE`) made a focused tile's icon blend into its own
+focus outline, which uses that same accent.
+
+| App id | icon | Material Symbol |
+|---|---|---|
+| `clock` | clock face | `schedule` |
+| `weather` | sun | `wb_sunny` |
+| `hello` | waving hand | `waving_hand` |
+| `system` | speedometer | `speed` |
+| Settings tile | gear | `settings` |
+
+**Destination on the card:** `/sd/icons/apps/<app id>.bin` for a *builtin*
+app (its own directory is always `/fs/apps/<id>`, on flash — see
+`shell.c`'s `tile_icon_path()`). A *user* app on `/sd/apps/<id>/` instead
+keeps its icon right next to its own `ui.jsonl`, at `<dir>/icon.bin` — the
+convention `docs/app-format.md` already documented before either #34 or #35
+existed.
+
+## fetch.json.example
+
+One `{"items":[...]}` document covering every file above (both `weather/`
+and `apps/`), destined for wherever `manifest_url` in the card's
+`/sd/fetch.json` points — swap `<pc-ip>` for whatever this machine's LAN
+address actually is and serve this directory with e.g.
+`python -m http.server 8000 --bind 0.0.0.0` from here. ⚠️ **Bind explicitly to
+`0.0.0.0`** — `python -m http.server` defaulting to `::` (IPv6-only) is what
+made the very first fetch attempt fail with 16/16 items unreachable and an
+empty server log; the device only ever has an IPv4 address.

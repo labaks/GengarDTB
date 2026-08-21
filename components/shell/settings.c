@@ -601,6 +601,17 @@ static void fetch_status_cb(fetch_state_t state, int percent, const char *detail
         if (s_fetch_status_label) {
             lv_label_set_text(s_fetch_status_label, buf);
         }
+        /* Fetched files (icons today) only ever show up if something
+         * rebuilds Full list's tiles — found on hardware that a plain
+         * "done" status with no rebuild reads as "nothing happened", since
+         * navigating to Full list just redisplays the same tiles built at
+         * boot. Cheap either way (rebuilds from the registry already in
+         * memory, no new card access) — run it once the run has actually
+         * finished, success or not, since a partial failure can still have
+         * written some of the files. */
+        if (state == FETCH_DONE || state == FETCH_ERROR) {
+            shell_refresh_app_list();
+        }
         lvgl_port_unlock();
     }
 }

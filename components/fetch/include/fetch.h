@@ -27,13 +27,20 @@ typedef enum {
 
 typedef void (*fetch_progress_cb_t)(fetch_state_t state, int percent, const char *detail);
 
-/* Reads /sd/fetch.json:
+/* Reads /sd/fetch.json, which is either:
  *   {"items":[{"url":"http://host/a.bin","dest":"/sd/icons/weather/a.bin"}, ...]}
- * and downloads each item straight to its dest path, in a background task —
- * cb is called from that task, marshal onto the LVGL thread yourself before
- * touching any LVGL object (same convention as ota_progress_cb_t). Missing
- * parent directories under dest are created as needed. One item failing
- * does not stop the rest. A no-op if a fetch is already running. */
+ * or, so the card never has to be touched again after the first time:
+ *   {"manifest_url":"http://host/fetch_all.json"}
+ * — a pointer to a same-shaped {"items":[...]} document fetched fresh over
+ * HTTP on every run. The list that actually changes from batch to batch
+ * lives on the PC; the one-time file on the card is just a bootstrap
+ * pointer, same spirit as /sd/agent.json holding a token rather than the
+ * whole protocol. Either way, each item is downloaded straight to its dest
+ * path in a background task — cb is called from that task, marshal onto the
+ * LVGL thread yourself before touching any LVGL object (same convention as
+ * ota_progress_cb_t). Missing parent directories under dest are created as
+ * needed. One item failing does not stop the rest. A no-op if a fetch is
+ * already running. */
 void fetch_run(fetch_progress_cb_t cb);
 
 bool fetch_is_running(void);

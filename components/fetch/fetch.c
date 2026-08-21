@@ -13,6 +13,8 @@
 
 static const char *TAG = "fetch";
 
+#define FETCH_MANIFEST_MAX_BODY 8192
+
 static volatile bool s_running;
 
 /* Creates every missing directory in path's parent chain (e.g. for
@@ -98,10 +100,10 @@ static bool fetch_one(const char *url, const char *dest)
     return true;
 }
 
-/* {"items":[{"url":"...","dest":"..."}]} on the card — same convention as
- * /sd/wifi.json (#8) and /sd/ota.json (#17): a file, not something typed on
- * a keyboard this device does not have. */
-static cJSON *load_manifest(void)
+/* {"items":[...]} or {"manifest_url":"..."} on the card — same convention
+ * as /sd/wifi.json (#8) and /sd/ota.json (#17): a file, not something typed
+ * on a keyboard this device does not have. */
+static cJSON *load_local_manifest(void)
 {
     char path[64];
     snprintf(path, sizeof(path), "%s/fetch.json", BSP_SD_MOUNT_POINT);
@@ -121,6 +123,86 @@ static cJSON *load_manifest(void)
 
     cJSON *root = cJSON_Parse(buf);
     free(buf);
+    return root;
+}
+
+typedef struct {
+    char  *buf;
+    size_t len;
+} body_t;
+
+static esp_err_t body_event(esp_http_client_event_t *evt)
+{
+    body_t *body = evt->user_data;
+    if (evt->event_id != HTTP_EVENT_ON_DATA || !body) {
+        return ESP_OK;
+    }
+    if (body->len + evt->data_len > FETCH_MANIFEST_MAX_BODY) {
+        return ESP_FAIL;
+    }
+    memcpy(body->buf + body->len, evt->data, evt->data_len);
+    body->len += evt->data_len;
+    return ESP_OK;
+}
+
+/* The whole point of "manifest_url" (see fetch.h): the item list itself —
+ * the thing that actually changes every time a new batch of files needs
+ * pushing — lives on the PC, not the card. /sd/fetch.json becomes a
+ * one-time bootstrap pointer, same spirit as /sd/agent.json holding just a
+ * token rather than the whole protocol. */
+static cJSON *fetch_remote_manifest(const char *url)
+{
+    body_t body = { .buf = malloc(FETCH_MANIFEST_MAX_BODY + 1), .len = 0 };
+    if (!body.buf) {
+        return NULL;
+    }
+
+    const esp_http_client_config_t cfg = {
+        .url               = url,
+        .method            = HTTP_METHOD_GET,
+        .event_handler     = body_event,
+        .user_data         = &body,
+        .timeout_ms        = 10000,
+        .buffer_size       = 2048,
+        .disable_auto_redirect = true,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        free(body.buf);
+        return NULL;
+    }
+
+    const esp_err_t err = esp_http_client_perform(client);
+    const int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+
+    if (err != ESP_OK || status != 200) {
+        ESP_LOGE(TAG, "manifest GET '%s' failed: %s (HTTP %d)", url, esp_err_to_name(err), status);
+        free(body.buf);
+        return NULL;
+    }
+
+    body.buf[body.len] = '\0';
+    cJSON *root = cJSON_Parse(body.buf);
+    free(body.buf);
+    return root;
+}
+
+/* Resolves the local file to the manifest actually worth iterating: either
+ * it already has "items" (the simple, everything-on-the-card case), or it
+ * points at "manifest_url" and this fetches that instead. */
+static cJSON *load_manifest(void)
+{
+    cJSON *root = load_local_manifest();
+    if (!root) {
+        return NULL;
+    }
+    const char *manifest_url = cJSON_GetStringValue(cJSON_GetObjectItem(root, "manifest_url"));
+    if (manifest_url && *manifest_url) {
+        cJSON *remote = fetch_remote_manifest(manifest_url);
+        cJSON_Delete(root);
+        return remote;
+    }
     return root;
 }
 

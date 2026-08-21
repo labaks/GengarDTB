@@ -1,68 +1,88 @@
 {
   "items": [
     {
-      "url": "http://<pc-ip>:8000/clear_day.bin",
+      "url": "http://<pc-ip>:8000/weather/clear_day.bin",
       "dest": "/sd/icons/weather/clear_day.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/cloudy.bin",
+      "url": "http://<pc-ip>:8000/weather/cloudy.bin",
       "dest": "/sd/icons/weather/cloudy.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/drizzle.bin",
+      "url": "http://<pc-ip>:8000/weather/drizzle.bin",
       "dest": "/sd/icons/weather/drizzle.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/flurries.bin",
+      "url": "http://<pc-ip>:8000/weather/flurries.bin",
       "dest": "/sd/icons/weather/flurries.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/haze_fog_dust_smoke.bin",
+      "url": "http://<pc-ip>:8000/weather/haze_fog_dust_smoke.bin",
       "dest": "/sd/icons/weather/haze_fog_dust_smoke.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/heavy_rain.bin",
+      "url": "http://<pc-ip>:8000/weather/heavy_rain.bin",
       "dest": "/sd/icons/weather/heavy_rain.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/heavy_snow.bin",
+      "url": "http://<pc-ip>:8000/weather/heavy_snow.bin",
       "dest": "/sd/icons/weather/heavy_snow.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/icy.bin",
+      "url": "http://<pc-ip>:8000/weather/icy.bin",
       "dest": "/sd/icons/weather/icy.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/isolated_thunderstorms.bin",
+      "url": "http://<pc-ip>:8000/weather/isolated_thunderstorms.bin",
       "dest": "/sd/icons/weather/isolated_thunderstorms.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/mostly_clear_day.bin",
+      "url": "http://<pc-ip>:8000/weather/mostly_clear_day.bin",
       "dest": "/sd/icons/weather/mostly_clear_day.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/partly_cloudy_day.bin",
+      "url": "http://<pc-ip>:8000/weather/partly_cloudy_day.bin",
       "dest": "/sd/icons/weather/partly_cloudy_day.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/rain_with_cloudy.bin",
+      "url": "http://<pc-ip>:8000/weather/rain_with_cloudy.bin",
       "dest": "/sd/icons/weather/rain_with_cloudy.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/scattered_snow_showers_day.bin",
+      "url": "http://<pc-ip>:8000/weather/scattered_snow_showers_day.bin",
       "dest": "/sd/icons/weather/scattered_snow_showers_day.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/showers_rain.bin",
+      "url": "http://<pc-ip>:8000/weather/showers_rain.bin",
       "dest": "/sd/icons/weather/showers_rain.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/snow_with_cloudy.bin",
+      "url": "http://<pc-ip>:8000/weather/snow_with_cloudy.bin",
       "dest": "/sd/icons/weather/snow_with_cloudy.bin"
     },
     {
-      "url": "http://<pc-ip>:8000/thunderstorms.bin",
+      "url": "http://<pc-ip>:8000/weather/thunderstorms.bin",
       "dest": "/sd/icons/weather/thunderstorms.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/apps/clock.bin",
+      "dest": "/sd/icons/apps/clock.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/apps/hello.bin",
+      "dest": "/sd/icons/apps/hello.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/apps/settings.bin",
+      "dest": "/sd/icons/apps/settings.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/apps/system.bin",
+      "dest": "/sd/icons/apps/system.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/apps/weather.bin",
+      "dest": "/sd/icons/apps/weather.bin"
     }
   ]
 }
