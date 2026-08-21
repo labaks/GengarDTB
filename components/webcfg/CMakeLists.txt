@@ -7,5 +7,6 @@ idf_component_register(
         bsp
         json
         esp_http_server
+        esp_timer
         net
 )

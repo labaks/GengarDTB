@@ -8,6 +8,7 @@
 #include "cJSON.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "net.h"
 
 static const char *TAG = "webcfg";
@@ -19,6 +20,24 @@ static const char *TAG = "webcfg";
 #define FETCH_PATH  BSP_SD_MOUNT_POINT "/fetch.json"
 
 static httpd_handle_t s_httpd;
+
+/* Applying new WiFi credentials tears down and re-establishes the STA
+ * connection this very request arrived over — doing that synchronously
+ * inside the request handler, before the response goes out, raced the
+ * reply on its way to the browser and killed it mid-transfer (found on
+ * hardware: the page just hung and then dropped). net.c's own SoftAP setup
+ * form hit the exact same race for the exact same reason and already
+ * fixed it the same way: send the response first, apply after a short
+ * delay once the bytes have actually had time to leave. */
+static esp_timer_handle_t s_wifi_apply_timer;
+static char s_pending_ssid[33];
+static char s_pending_pass[65];
+
+static void wifi_apply_cb(void *arg)
+{
+    (void)arg;
+    net_set_credentials(s_pending_ssid, s_pending_pass);
+}
 
 /* -------------------------------------------------------------- JSON I/O */
 
@@ -269,6 +288,7 @@ static esp_err_t post_handler(httpd_req_t *req)
         return httpd_resp_send_500(req);
     }
     int changed = 0;
+    bool wifi_touched = false;
 
     #define FIELD(param, path, key)                                            \
         do {                                                                   \
@@ -281,8 +301,41 @@ static esp_err_t post_handler(httpd_req_t *req)
         } while (0)
 
     FIELD("device_name",        DEVICE_PATH, "name");
-    FIELD("wifi_ssid",          WIFI_PATH,   "ssid");
-    FIELD("wifi_password",      WIFI_PATH,   "password");
+
+    /* WiFi is a pair used together for one connection attempt, not two
+     * independent fields — after writing whichever of the two the user
+     * actually submitted (still through the same blank-means-leave-alone
+     * primitive as everything else), read the *whole* pair back out of
+     * wifi.json (so a blank password field does not get applied as "no
+     * password" when only the SSID was being fixed) and hand it to
+     * net_set_credentials(), the same call the SoftAP setup form uses, so
+     * the change takes effect now instead of waiting for a manual reboot.
+     * Plain write_string_field() alone would leave wifi.json — the
+     * highest-priority credential source, see CLAUDE.md — updated but
+     * silently unapplied until the next boot. */
+    raw[0] = '\0';
+    httpd_query_key_value(body, "wifi_ssid", raw, 192);
+    url_decode(decoded, 192, raw);
+    if (write_string_field(WIFI_PATH, "ssid", decoded)) {
+        wifi_touched = true;
+        changed++;
+    }
+    raw[0] = '\0';
+    httpd_query_key_value(body, "wifi_password", raw, 192);
+    url_decode(decoded, 192, raw);
+    if (write_string_field(WIFI_PATH, "password", decoded)) {
+        wifi_touched = true;
+        changed++;
+    }
+    if (wifi_touched) {
+        /* Into the static pending buffers, not applied yet — see
+         * wifi_apply_cb()'s own comment on why this waits until after the
+         * response for this very request has gone out. */
+        s_pending_ssid[0] = s_pending_pass[0] = '\0';
+        read_string_field(WIFI_PATH, "ssid", s_pending_ssid, sizeof(s_pending_ssid));
+        read_string_field(WIFI_PATH, "password", s_pending_pass, sizeof(s_pending_pass));
+    }
+
     FIELD("agent_token",        AGENT_PATH,  "token");
     FIELD("ota_url",            OTA_PATH,    "url");
     FIELD("ota_manifest_url",   OTA_PATH,    "manifest_url");
@@ -294,14 +347,24 @@ static esp_err_t post_handler(httpd_req_t *req)
     free(raw);
     free(decoded);
 
-    char page[256];
+    char page[384];
     snprintf(page, sizeof(page),
         "<!doctype html><html><body style=\"font-family:sans-serif;max-width:420px;"
         "margin:24px auto;padding:0 16px\"><h2>Saved</h2>"
         "<p>%d field(s) updated. Anything left blank was not touched.</p>"
-        "<p><a href=\"/\">Back</a></p></body></html>", changed);
+        "%s"
+        "<p><a href=\"/\">Back</a></p></body></html>",
+        changed,
+        wifi_touched ? "<p>Reconnecting to the new WiFi network shortly — if it "
+                       "is different from this one, this page will stop "
+                       "responding once that happens.</p>" : "");
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_sendstr(req, page);
+    const esp_err_t err = httpd_resp_sendstr(req, page);
+
+    if (wifi_touched) {
+        esp_timer_start_once(s_wifi_apply_timer, 800 * 1000);
+    }
+    return err;
 }
 
 esp_err_t webcfg_start(void)
@@ -314,6 +377,17 @@ esp_err_t webcfg_start(void)
     if (!net_get_ip(ip, sizeof(ip))) {
         ESP_LOGW(TAG, "cannot start — WiFi is not up");
         return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!s_wifi_apply_timer) {
+        const esp_timer_create_args_t targs = {
+            .callback = wifi_apply_cb,
+            .name = "webcfg_wifi_apply",
+        };
+        if (esp_timer_create(&targs, &s_wifi_apply_timer) != ESP_OK) {
+            ESP_LOGE(TAG, "cannot create WiFi-apply timer");
+            return ESP_FAIL;
+        }
     }
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
