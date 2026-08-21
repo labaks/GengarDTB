@@ -76,6 +76,7 @@ static lv_obj_t   *s_tz_btn;              /* Network */
 static lv_obj_t   *s_wifi_btn;            /* Network */
 static lv_obj_t   *s_ota_btn;             /* About */
 static lv_obj_t   *s_ota_status_label;    /* About */
+static lv_obj_t   *s_ota_confirm_btn;     /* About */
 static lv_obj_t   *s_fetch_status_label;  /* Apps */
 static lv_obj_t   *s_ram_arc;             /* Storage */
 static lv_obj_t   *s_ram_pct_label;       /* Storage */
@@ -525,11 +526,11 @@ static void wifi_clicked(lv_event_t *e)
 
 /* --------------------------------------------------------------------- OTA */
 
-/* Runs on the OTA task, not the LVGL one — must take the lock itself, same
- * convention as net.c/host.c's own state-change callbacks. Guards against
- * s_ota_status_label already being gone (settings screen closed, or just not
- * on the About view any more) by failing the lock/null-check silently; the
- * OTA task itself does not care whether anyone is listening. */
+/* Runs on the OTA update task, not the LVGL one — must take the lock itself,
+ * same convention as net.c/host.c's own state-change callbacks. Guards
+ * against s_ota_status_label already being gone (settings screen closed, or
+ * just not on the About view any more) by failing the lock/null-check
+ * silently; the OTA task itself does not care whether anyone is listening. */
 static void ota_status_cb(ota_state_t state, int percent, const char *detail)
 {
     char buf[64];
@@ -563,13 +564,70 @@ static void ota_status_cb(ota_state_t state, int percent, const char *detail)
     }
 }
 
+static void update_confirm_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (ota_is_running()) {
+        return;
+    }
+    ota_start_update(ota_status_cb);
+}
+
+/* ROADMAP #38.4: "Check for update" used to start flashing immediately —
+ * now it only ever calls ota_check(), which itself never touches flash (see
+ * ota.h). The confirm button stays hidden until a check actually finds
+ * something newer, and disappears again the moment a fresh check starts —
+ * a stale "Update available" from a previous check must not survive a
+ * "no update"/error result from clicking Check again. */
+static void ota_check_status_cb(ota_check_state_t state, const char *version, size_t size_bytes,
+                                const char *detail)
+{
+    char buf[64];
+    switch (state) {
+    case OTA_CHECK_CHECKING:
+        snprintf(buf, sizeof(buf), "Checking for update...");
+        break;
+    case OTA_CHECK_AVAILABLE:
+        if (size_bytes > 0) {
+            snprintf(buf, sizeof(buf), "Update available: %s (%lu KB)",
+                     version, (unsigned long)(size_bytes / 1024));
+        } else {
+            snprintf(buf, sizeof(buf), "Update available: %s", version);
+        }
+        break;
+    case OTA_CHECK_UP_TO_DATE:
+        snprintf(buf, sizeof(buf), "Up to date (%s)", version);
+        break;
+    case OTA_CHECK_ERROR:
+        snprintf(buf, sizeof(buf), "Check failed: %s", detail ? detail : "?");
+        break;
+    default:
+        buf[0] = '\0';
+        break;
+    }
+
+    if (lvgl_port_lock(200)) {
+        if (s_ota_status_label) {
+            lv_label_set_text(s_ota_status_label, buf);
+        }
+        if (s_ota_confirm_btn) {
+            if (state == OTA_CHECK_AVAILABLE) {
+                lv_obj_remove_flag(s_ota_confirm_btn, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(s_ota_confirm_btn, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        lvgl_port_unlock();
+    }
+}
+
 static void ota_clicked(lv_event_t *e)
 {
     (void)e;
     if (ota_is_running()) {
         return;
     }
-    ota_check_and_update(ota_status_cb);
+    ota_check(ota_check_status_cb);
 }
 
 /* -------------------------------------------------------------------- Fetch */
@@ -779,6 +837,16 @@ static void build_about(void)
     lv_obj_add_event_cb(s_ota_btn, ota_clicked, LV_EVENT_CLICKED, NULL);
     lv_group_add_obj(s_group, s_ota_btn);
     s_ota_status_label = list_text("");
+
+    /* Hidden until a check actually finds a newer version — see
+     * ota_check_status_cb(). Still a member of s_group even while hidden:
+     * LVGL's own PREV/NEXT navigation skips hidden objects on its own (see
+     * delete_panel_close()'s comment elsewhere in this file for the same
+     * behavior relied on there), so there is nothing extra to manage here. */
+    s_ota_confirm_btn = lv_list_add_button(s_list, NULL, "Update now");
+    lv_obj_add_flag(s_ota_confirm_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(s_ota_confirm_btn, update_confirm_clicked, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(s_group, s_ota_confirm_btn);
 }
 
 /* LVGL's built-in symbol font (lv_symbol_def.h) has no sun/brightness glyph,
@@ -1267,6 +1335,7 @@ static void show_view(settings_view_t view)
     s_tz_btn = NULL;
     s_wifi_btn = NULL;
     s_ota_btn = NULL;
+    s_ota_confirm_btn = NULL;
     s_ota_status_label = NULL;
     s_fetch_status_label = NULL;
     s_ram_arc = NULL;
@@ -1355,6 +1424,7 @@ void settings_close(void)
     s_tz_btn = NULL;
     s_wifi_btn = NULL;
     s_ota_btn = NULL;
+    s_ota_confirm_btn = NULL;
     s_ota_status_label = NULL;
     s_fetch_status_label = NULL;
     s_ram_arc = NULL;

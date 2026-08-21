@@ -1,6 +1,7 @@
 #include "ota.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "bsp_pins.h"
@@ -14,12 +15,17 @@
 
 static const char *TAG = "ota";
 
+#define OTA_MANIFEST_MAX_BODY 1024
+
 static volatile bool s_running;
 
-/* {"url":"http://host/deskos.bin"} on the microSD card — same convention as
- * /sd/wifi.json (#8) and /sd/agent.json (#12/#13): a file, not something
- * typed on a keyboard this device does not have. */
-static bool load_url(char *out, size_t out_size)
+/* {"url":"http://host/deskos.bin","manifest_url":"http://host/update.json"}
+ * on the microSD card — same convention as /sd/wifi.json (#8) and
+ * /sd/agent.json (#12/#13): a file, not something typed on a keyboard this
+ * device does not have. "manifest_url" is only read by ota_check(); older
+ * files without it simply can't be checked (ota_start_update() itself only
+ * ever needed "url"). */
+static bool load_json_field(const char *field, char *out, size_t out_size)
 {
     char path[64];
     snprintf(path, sizeof(path), "%s/ota.json", BSP_SD_MOUNT_POINT);
@@ -36,9 +42,9 @@ static bool load_url(char *out, size_t out_size)
     cJSON *root = cJSON_Parse(buf);
     bool ok = false;
     if (root) {
-        const char *url = cJSON_GetStringValue(cJSON_GetObjectItem(root, "url"));
-        if (url && *url) {
-            snprintf(out, out_size, "%s", url);
+        const char *value = cJSON_GetStringValue(cJSON_GetObjectItem(root, field));
+        if (value && *value) {
+            snprintf(out, out_size, "%s", value);
             ok = true;
         }
         cJSON_Delete(root);
@@ -46,14 +52,168 @@ static bool load_url(char *out, size_t out_size)
     return ok;
 }
 
-static void ota_task(void *arg)
+/* Plain X.Y.Z compare — this project's own version.txt (ROADMAP #38.3) never
+ * carries a pre-release/build suffix, so none is parsed here. Missing
+ * components count as 0 ("1.2" == "1.2.0"). Returns <0/0/>0 like strcmp. */
+static int semver_cmp(const char *a, const char *b)
+{
+    int an, bn;
+    for (int i = 0; i < 3; i++) {
+        an = atoi(a);
+        bn = atoi(b);
+        if (an != bn) {
+            return an - bn;
+        }
+        a = strchr(a, '.');
+        b = strchr(b, '.');
+        a = a ? a + 1 : "0";
+        b = b ? b + 1 : "0";
+    }
+    return 0;
+}
+
+typedef struct {
+    char  *buf;
+    size_t len;
+} body_t;
+
+static esp_err_t body_event(esp_http_client_event_t *evt)
+{
+    body_t *body = evt->user_data;
+    if (evt->event_id != HTTP_EVENT_ON_DATA || !body) {
+        return ESP_OK;
+    }
+    if (body->len + evt->data_len > OTA_MANIFEST_MAX_BODY) {
+        return ESP_FAIL;
+    }
+    memcpy(body->buf + body->len, evt->data, evt->data_len);
+    body->len += evt->data_len;
+    return ESP_OK;
+}
+
+/* Deliberately never touches esp_https_ota/esp_ota_ops — see ota.h's own
+ * comment on why the two entry points are split. Just a plain GET of a
+ * small JSON document. */
+static void ota_check_task(void *arg)
+{
+    const ota_check_cb_t cb = (ota_check_cb_t)arg;
+    char manifest_url[256];
+
+    if (cb) {
+        cb(OTA_CHECK_CHECKING, NULL, 0, NULL);
+    }
+
+    if (!load_json_field("manifest_url", manifest_url, sizeof(manifest_url))) {
+        ESP_LOGW(TAG, "no manifest_url in /sd/ota.json — nothing to check against");
+        if (cb) {
+            cb(OTA_CHECK_ERROR, NULL, 0, "no manifest_url in /sd/ota.json");
+        }
+        goto done;
+    }
+
+    {
+        body_t body = { .buf = malloc(OTA_MANIFEST_MAX_BODY + 1), .len = 0 };
+        if (!body.buf) {
+            if (cb) {
+                cb(OTA_CHECK_ERROR, NULL, 0, "out of memory");
+            }
+            goto done;
+        }
+
+        const esp_http_client_config_t cfg = {
+            .url               = manifest_url,
+            .method            = HTTP_METHOD_GET,
+            .event_handler     = body_event,
+            .user_data         = &body,
+            .timeout_ms        = 10000,
+            .buffer_size       = 1024,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .disable_auto_redirect = true,
+        };
+        esp_http_client_handle_t client = esp_http_client_init(&cfg);
+        if (!client) {
+            free(body.buf);
+            if (cb) {
+                cb(OTA_CHECK_ERROR, NULL, 0, "cannot init HTTP client");
+            }
+            goto done;
+        }
+
+        const esp_err_t err = esp_http_client_perform(client);
+        const int status = esp_http_client_get_status_code(client);
+        esp_http_client_cleanup(client);
+
+        if (err != ESP_OK || status != 200) {
+            ESP_LOGW(TAG, "manifest GET '%s' failed: %s (HTTP %d)", manifest_url, esp_err_to_name(err), status);
+            free(body.buf);
+            if (cb) {
+                cb(OTA_CHECK_ERROR, NULL, 0, "manifest fetch failed");
+            }
+            goto done;
+        }
+
+        body.buf[body.len] = '\0';
+        cJSON *root = cJSON_Parse(body.buf);
+        free(body.buf);
+
+        if (!root) {
+            if (cb) {
+                cb(OTA_CHECK_ERROR, NULL, 0, "manifest is not valid JSON");
+            }
+            goto done;
+        }
+
+        const char *version = cJSON_GetStringValue(cJSON_GetObjectItem(root, "version"));
+        const cJSON *size_item = cJSON_GetObjectItem(root, "size");
+        const size_t size_bytes = cJSON_IsNumber(size_item) ? (size_t)cJSON_GetNumberValue(size_item) : 0;
+
+        if (!version || !*version) {
+            cJSON_Delete(root);
+            if (cb) {
+                cb(OTA_CHECK_ERROR, NULL, 0, "manifest has no 'version'");
+            }
+            goto done;
+        }
+
+        const char *current = esp_app_get_description()->version;
+        const bool newer = semver_cmp(version, current) > 0;
+        ESP_LOGI(TAG, "update check: running '%s', manifest '%s' (%s)",
+                 current, version, newer ? "newer" : "not newer");
+
+        char version_copy[32];
+        snprintf(version_copy, sizeof(version_copy), "%s", version);
+        cJSON_Delete(root);
+
+        if (cb) {
+            cb(newer ? OTA_CHECK_AVAILABLE : OTA_CHECK_UP_TO_DATE, version_copy, size_bytes, NULL);
+        }
+    }
+
+done:
+    s_running = false;
+    vTaskDelete(NULL);
+}
+
+void ota_check(ota_check_cb_t cb)
+{
+    if (s_running) {
+        return;
+    }
+    s_running = true;
+    if (xTaskCreate(ota_check_task, "ota_check", 4096, (void *)cb, 3, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "cannot start OTA check task");
+        s_running = false;
+    }
+}
+
+static void ota_update_task(void *arg)
 {
     const ota_progress_cb_t cb = (ota_progress_cb_t)arg;
     char url[256];
     esp_https_ota_handle_t handle = NULL;
     esp_err_t err;
 
-    if (!load_url(url, sizeof(url))) {
+    if (!load_json_field("url", url, sizeof(url))) {
         ESP_LOGW(TAG, "no /sd/ota.json — nothing to update from");
         if (cb) {
             cb(OTA_ERROR, 0, "no /sd/ota.json");
@@ -137,14 +297,14 @@ done:
     vTaskDelete(NULL);
 }
 
-void ota_check_and_update(ota_progress_cb_t cb)
+void ota_start_update(ota_progress_cb_t cb)
 {
     if (s_running) {
         return;
     }
     s_running = true;
-    if (xTaskCreate(ota_task, "ota", 8192, (void *)cb, 3, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "cannot start OTA task");
+    if (xTaskCreate(ota_update_task, "ota", 8192, (void *)cb, 3, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "cannot start OTA update task");
         s_running = false;
     }
 }
