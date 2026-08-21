@@ -852,9 +852,10 @@ static void add_divider(void)
     lv_obj_set_style_margin_bottom(d, 6, LV_PART_MAIN);
 }
 
-/* Logo placeholder — no real asset yet (see ROADMAP #28 on the lack of any
- * icon pipeline at all), just a coloured circle reserving the spot at the
- * top of the device identity screen. */
+/* Logo: /sd/icons/logo.bin (ROADMAP #46), same "asset on SD, load if
+ * present" convention as tile icons (shell.c: tile_icon_path()) — falls
+ * back to a coloured circle if the card or the file is missing, same
+ * degrade-not-crash rule as everywhere else an SD asset is optional. */
 static void build_about(void)
 {
     add_back_row(VIEW_MENU);
@@ -868,12 +869,25 @@ static void build_about(void)
     lv_obj_set_flex_flow(logo_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(logo_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    lv_obj_t *logo = lv_obj_create(logo_row);
-    lv_obj_remove_flag(logo, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(logo, 48, 48);
-    lv_obj_set_style_radius(logo, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(logo, lv_palette_main(LV_PALETTE_DEEP_PURPLE), LV_PART_MAIN);
-    lv_obj_set_style_border_width(logo, 0, LV_PART_MAIN);
+    char logo_path[64];
+    snprintf(logo_path, sizeof(logo_path), "%s/icons/logo.bin", BSP_SD_MOUNT_POINT);
+    FILE *lf = fopen(logo_path, "rb");
+    if (lf) {
+        fclose(lf);
+        char src[80];
+        snprintf(src, sizeof(src), "A:%s", logo_path);
+        lv_obj_t *logo = lv_image_create(logo_row);
+        lv_image_set_src(logo, src);
+        lv_obj_set_style_image_recolor(logo, shell_theme_text(), LV_PART_MAIN);
+        lv_obj_set_style_image_recolor_opa(logo, LV_OPA_COVER, LV_PART_MAIN);
+    } else {
+        lv_obj_t *logo = lv_obj_create(logo_row);
+        lv_obj_remove_flag(logo, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(logo, 48, 48);
+        lv_obj_set_style_radius(logo, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(logo, lv_palette_main(LV_PALETTE_DEEP_PURPLE), LV_PART_MAIN);
+        lv_obj_set_style_border_width(logo, 0, LV_PART_MAIN);
+    }
 
     add_divider();
 

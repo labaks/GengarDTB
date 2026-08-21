@@ -83,6 +83,10 @@
     {
       "url": "http://<pc-ip>:8000/apps/weather.bin",
       "dest": "/sd/icons/apps/weather.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/logo.bin",
+      "dest": "/sd/icons/logo.bin"
     }
   ]
 }

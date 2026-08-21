@@ -1,4 +1,4 @@
-"""SVG -> LVGL v9 binary image converter (ROADMAP #34).
+"""SVG/PNG -> LVGL v9 binary image converter (ROADMAP #34, #46).
 
 Icons live on the SD card, not compiled into flash (see CLAUDE.md, "Что НЕ
 делать") -- LVGL loads them at runtime via LV_USE_FS_STDIO from a plain
@@ -21,8 +21,18 @@ support does not resolve <linearGradient>/<radialGradient> refs at all (it
 silently falls back to black rather than erroring, which is what actually
 surfaced this — see ROADMAP #34).
 
+PNG input is also accepted (ROADMAP #46, the About-screen logo) -- loaded
+directly via Pillow, no SVG rendering step. The last CLI argument means a
+different thing for each input type: for an SVG it is the output's
+(square) size_px; for a PNG it is an integer *scale factor*, nearest-
+neighbour, not a target size -- forcing a small pixel-art source into an
+arbitrary square would distort its aspect ratio and blur its edges, and
+this project's one PNG source so far is deliberately blocky pixel art
+where only an integer multiple keeps every edge crisp.
+
 Usage:
     python tools/icon_convert.py <input.svg> <output.bin> [size_px]
+    python tools/icon_convert.py <input.png> <output.bin> [scale]
 
 Requires: pymupdf, pillow (both already available in this environment).
 """
@@ -88,8 +98,21 @@ def write_lv_bin(img, out_path):
         f.write(bgra)
 
 
-def convert(svg_path, out_path, size_px=40):
-    img = render_svg(svg_path, size_px)
+def render_png(png_path, scale):
+    """Returns a PIL RGBA Image, nearest-neighbour scaled by an integer
+    factor -- preserves crisp edges on small pixel-art sources instead of
+    blurring them the way a smooth resize to an arbitrary size would."""
+    img = Image.open(png_path).convert("RGBA")
+    if scale != 1:
+        img = img.resize((img.width * scale, img.height * scale), Image.NEAREST)
+    return img
+
+
+def convert(src_path, out_path, size_px=40):
+    if src_path.lower().endswith(".png"):
+        img = render_png(src_path, size_px)
+    else:
+        img = render_svg(src_path, size_px)
     write_lv_bin(img, out_path)
     return img
 
@@ -98,8 +121,8 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         print(__doc__)
         sys.exit(1)
-    svg_in = sys.argv[1]
+    src_in = sys.argv[1]
     bin_out = sys.argv[2]
     px = int(sys.argv[3]) if len(sys.argv) > 3 else 40
-    convert(svg_in, bin_out, px)
-    print(f"wrote {bin_out} ({px}x{px})")
+    img = convert(src_in, bin_out, px)
+    print(f"wrote {bin_out} ({img.width}x{img.height})")

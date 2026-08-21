@@ -1,4 +1,4 @@
-# Icons (ROADMAP #34, #35)
+# Icons (ROADMAP #34, #35, #46)
 
 Not compiled into firmware — CLAUDE.md, "Что НЕ делать" is explicit that
 assets stay off flash. Everything under this directory is a *build artifact
@@ -86,6 +86,22 @@ app (its own directory is always `/fs/apps/<id>`, on flash — see
 keeps its icon right next to its own `ui.jsonl`, at `<dir>/icon.bin` — the
 convention `docs/app-format.md` already documented before either #34 or #35
 existed.
+
+## logo.bin
+
+Settings → About device (ROADMAP #46). Source: user-provided pixel-art
+silhouette (`D:/Pictures/logo.png`, 31×27, flat black on transparent — not
+part of this repo). Converted with `tools/icon_convert.py`'s PNG path at an
+integer `scale` of 2 (nearest-neighbour, not the SVG path's `size_px` — see
+that script's docstring for why raw pixel art needs an integer multiple
+instead of a resize to an arbitrary square) → 62×54, fits the About screen's
+64px logo row. Recolored at render time the same way as `apps/` above
+(`shell_theme_text()`), so it stays visible in both themes instead of
+vanishing as flat black on a dark background.
+
+**Destination on the card:** `/sd/icons/logo.bin` — `settings.c`'s
+`build_about()` falls back to the old placeholder circle if the file isn't
+there, same degrade-not-crash rule as every other optional SD asset.
 
 ## fetch.json.example
 

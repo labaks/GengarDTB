@@ -36,7 +36,8 @@ RTS, чтобы поймать лог именно с начала загруз�
 (`idf.py coredump-info -p COMxx`), не через повторный serial-мониторинг.
 
 Дальше по порядку: план работ в [ROADMAP.md](ROADMAP.md), формат приложений в
-[docs/app-format.md](docs/app-format.md).
+[docs/app-format.md](docs/app-format.md), внешние источники данных и ассетов —
+в [docs/attributions.md](docs/attributions.md).
 
 **Правило коммитов:** тайтл начинается с номера задачи ROADMAP, например
 `#18. Apps: rescan + delete from device, no reboot`.
