@@ -901,7 +901,14 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
 {
     const lvgl_port_cfg_t port_cfg = {
         .task_priority   = 4,
-        .task_stack      = 6144,
+        /* Was 6144 — real "A stack overflow in task taskLVGL" on hardware
+         * (ROADMAP #46, idf.py coredump-info) the first time build_about()
+         * called lv_image_create() (About device's logo). That call path
+         * was never exercised before; whatever margin 6144 had, it did not
+         * survive the first lv_image_* call from this specific screen.
+         * Bumped the same way webcfg's httpd stack was (#45) — defense in
+         * depth on top of, not instead of, keeping locals small. */
+        .task_stack      = 8192,
         /* Core 1. WiFi and TLS own core 0; with no PSRAM this separation is the
          * difference between a smooth UI and visible stutter on every fetch. */
         .task_affinity   = 1,

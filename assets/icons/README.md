@@ -108,11 +108,22 @@ there, same degrade-not-crash rule as every other optional SD asset.
 
 ## fetch.json.example
 
-One `{"items":[...]}` document covering every file above (both `weather/`
-and `apps/`), destined for wherever `manifest_url` in the card's
+One `{"items":[...]}` document covering every file above (both `weather/`,
+`apps/` and `logo.bin`), destined for wherever `manifest_url` in the card's
 `/sd/fetch.json` points — swap `<pc-ip>` for whatever this machine's LAN
 address actually is and serve this directory with e.g.
 `python -m http.server 8000 --bind 0.0.0.0` from here. ⚠️ **Bind explicitly to
 `0.0.0.0`** — `python -m http.server` defaulting to `::` (IPv6-only) is what
 made the very first fetch attempt fail with 16/16 items unreachable and an
 empty server log; the device only ever has an IPv4 address.
+
+⚠️ **Do not point `manifest_url` at this `.example` file directly** — its
+`<pc-ip>` is a literal placeholder, not something the device or the server
+substitutes. Pointing at it as-is makes the device fetch the manifest fine
+(one clean 200 in the server log) and then fail every single item with an
+unresolvable host — a 22/22 failure that looks like a network problem but
+is a config mistake. Generate a real copy first, e.g.
+`sed 's/<pc-ip>/192.168.1.xxx/g' fetch.json.example > fetch.local.json`,
+and point the form at `fetch.local.json` instead — `*.local.json` is
+already gitignored, this file is meant to be regenerated per LAN, not
+committed.
