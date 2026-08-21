@@ -53,6 +53,12 @@ size_t settings_pinned_apps(const app_info_t **out, size_t max);
  * shell.c's showcase_tick() polls this once a second. */
 bool settings_showcase_enabled(void);
 
+/* True for the dark theme (the default before this setting existed, see
+ * ROADMAP #32), false for light. Reads NVS directly, same as the two above —
+ * shell_start() calls this once at boot, before any screen exists, to pick
+ * the palette everything comes up in. */
+bool settings_theme_is_dark(void);
+
 #ifdef __cplusplus
 }
 #endif

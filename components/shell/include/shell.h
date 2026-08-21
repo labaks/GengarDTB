@@ -44,6 +44,34 @@ void shell_set_input_group(lv_group_t *group);
  * not Full list is the screen currently on display. */
 void shell_refresh_app_list(void);
 
+/* ROADMAP #32: shell-wide light/dark theme. The persisted choice lives in
+ * settings.c (settings_theme_is_dark()); this pair is what actually applies
+ * it to what is on screen right now:
+ *
+ *   - shell_apply_theme() re-points LVGL's own default theme (buttons,
+ *     switches, sliders, lists, the spinner...) at the new palette via
+ *     lv_theme_default_init() — every default-styled object already on
+ *     screen picks this up on its own (LVGL re-applies the shared style
+ *     structs in place), so Full list's tiles and every row in Settings
+ *     need no code of their own to follow. It then re-colors the handful of
+ *     screens that set their own background explicitly (Home, Full list) —
+ *     a local style override always wins over the theme, so those never
+ *     follow it automatically.
+ *   - shell_theme_bg()/shell_theme_text() are that same pair of colors, for
+ *     a native screen elsewhere (Settings) that sets its own root background
+ *     the same way and needs to match.
+ *
+ * Deliberately NOT touched by either: the toolbar (always dark — it overlays
+ * an open widget far more often than it overlays Home/Full list, and a
+ * widget's own ui.jsonl colors never follow this theme either, see below)
+ * and any open widget (ROADMAP #32's scope decision: the toggle covers the
+ * shell's own chrome, not the declarative layer-A format — widget.c already
+ * hardcodes its own colors per ui.jsonl line, same as it did before this
+ * setting existed). */
+void shell_apply_theme(bool dark);
+lv_color_t shell_theme_bg(void);
+lv_color_t shell_theme_text(void);
+
 #ifdef __cplusplus
 }
 #endif

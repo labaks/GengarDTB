@@ -57,6 +57,7 @@ typedef enum {
 } shell_mode_t;
 
 static shell_mode_t     s_mode = SHELL_HOME;
+static bool              s_dark_theme = true;   /* ROADMAP #32; loaded from NVS in shell_start() */
 static lv_obj_t         *s_home_screen;
 static lv_obj_t         *s_home_label;
 static lv_obj_t         *s_full_list_screen;
@@ -314,11 +315,11 @@ static void show_full_list(void)
 static void build_home_screen(void)
 {
     s_home_screen = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(s_home_screen, lv_color_hex(0x101418), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_home_screen, shell_theme_bg(), LV_PART_MAIN);
     lv_obj_remove_flag(s_home_screen, LV_OBJ_FLAG_SCROLLABLE);
 
     s_home_label = lv_label_create(s_home_screen);
-    lv_obj_set_style_text_color(s_home_label, lv_color_hex(0xC0C8D0), LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_home_label, shell_theme_text(), LV_PART_MAIN);
     lv_label_set_long_mode(s_home_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_home_label, LV_PCT(80));
     lv_obj_set_style_text_align(s_home_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
@@ -385,7 +386,7 @@ static void populate_full_list(void)
 static void build_full_list_screen(void)
 {
     s_full_list_screen = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(s_full_list_screen, lv_color_hex(0x101418), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_full_list_screen, shell_theme_bg(), LV_PART_MAIN);
     lv_obj_set_flex_flow(s_full_list_screen, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_style_pad_all(s_full_list_screen, 8, LV_PART_MAIN);
     lv_obj_set_style_pad_top(s_full_list_screen, SHELL_TOOLBAR_HEIGHT + 4, LV_PART_MAIN);   /* room for the toolbar */
@@ -400,6 +401,51 @@ static void build_full_list_screen(void)
 void shell_refresh_app_list(void)
 {
     populate_full_list();
+}
+
+/* ----------------------------------------------------------------- theming */
+
+/* Same tones LVGL's own default theme uses for its "screen"/"card" bg and
+ * text in each mode (see lv_theme_default.c's DARK_COLOR_SCR/LIGHT_COLOR_SCR
+ * and DARK_COLOR_TEXT/LIGHT_COLOR_TEXT — not exported, so recomputed here
+ * from the public palette API) — matching them exactly means a screen that
+ * sets this as its own explicit background sits flush against LVGL-themed
+ * children (buttons, list rows...) with no visible seam between the two. */
+lv_color_t shell_theme_bg(void)
+{
+    return s_dark_theme ? lv_color_hex(0x15171A) : lv_palette_lighten(LV_PALETTE_GREY, 4);
+}
+
+lv_color_t shell_theme_text(void)
+{
+    return s_dark_theme ? lv_palette_lighten(LV_PALETTE_GREY, 5) : lv_palette_darken(LV_PALETTE_GREY, 4);
+}
+
+void shell_apply_theme(bool dark)
+{
+    s_dark_theme = dark;
+
+    /* Re-inits the shared style structs LVGL's own theme_apply() already
+     * attached to every default-styled object at creation time (buttons,
+     * switches, sliders, lists, the spinner...) and reports the change —
+     * every one of them repaints with the new palette on its own, nothing
+     * else in this file or in settings.c has to walk its own object tree.
+     * Primary/secondary/font match the auto-init lv_display.c would have
+     * done on first use (see lv_display.c) — only dark actually changes. */
+    lv_theme_default_init(s_disp, lv_palette_main(LV_PALETTE_DEEP_PURPLE), lv_palette_main(LV_PALETTE_RED),
+                          dark, LV_FONT_DEFAULT);
+
+    const lv_color_t bg = shell_theme_bg();
+    const lv_color_t text = shell_theme_text();
+    if (s_home_screen) {
+        lv_obj_set_style_bg_color(s_home_screen, bg, LV_PART_MAIN);
+    }
+    if (s_home_label) {
+        lv_obj_set_style_text_color(s_home_label, text, LV_PART_MAIN);
+    }
+    if (s_full_list_screen) {
+        lv_obj_set_style_bg_color(s_full_list_screen, bg, LV_PART_MAIN);
+    }
 }
 
 /* ------------------------------------------------------------ system chords */
@@ -710,7 +756,7 @@ static void run_touch_calibration(void)
     lv_obj_remove_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(dot, 20, 20);
     lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(dot, lv_color_hex(0x4A9EFF), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(dot, lv_palette_main(LV_PALETTE_DEEP_PURPLE), LV_PART_MAIN);
     lv_obj_set_style_border_width(dot, 0, LV_PART_MAIN);
     lvgl_port_unlock();
 
@@ -811,10 +857,18 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
         return ESP_FAIL;
     }
 
+    /* Load the persisted theme (ROADMAP #32) and point LVGL's own default
+     * theme at it before any object exists, so nothing — including the
+     * calibration screen below, run before Settings itself is reachable —
+     * ever flashes up in the wrong palette for a frame. */
+    s_dark_theme = settings_theme_is_dark();
+    lv_theme_default_init(s_disp, lv_palette_main(LV_PALETTE_DEEP_PURPLE), lv_palette_main(LV_PALETTE_RED),
+                          s_dark_theme, LV_FONT_DEFAULT);
+
     /* Paint the whole screen once before anything else. The panel keeps its GRAM
      * across a reset, so without this the areas LVGL has not invalidated still
      * show the previous firmware's pixels. */
-    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x101418), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(lv_screen_active(), shell_theme_bg(), LV_PART_MAIN);
     lv_obj_invalidate(lv_screen_active());
     lvgl_port_unlock();
 
@@ -856,6 +910,12 @@ esp_err_t shell_start(esp_lcd_panel_io_handle_t io, esp_lcd_panel_handle_t panel
     lv_obj_remove_flag(toolbar, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_pos(toolbar, 0, 0);
     lv_obj_set_size(toolbar, BSP_LCD_H_RES, SHELL_TOOLBAR_HEIGHT);
+    /* Deliberately NOT part of shell_apply_theme() (ROADMAP #32): this bar
+     * overlays whatever is on screen, and most of the time that is an open
+     * widget — whose ui.jsonl colors never follow the shell theme either.
+     * Always-black-with-dim-text stays legible over that untouched dark
+     * content regardless of which shell theme is picked, instead of the
+     * toolbar flipping to light while everything drawn under it stays dark. */
     lv_obj_set_style_bg_color(toolbar, lv_color_hex(0x000000), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(toolbar, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(toolbar, 0, LV_PART_MAIN);

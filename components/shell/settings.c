@@ -20,6 +20,7 @@ static const char *TAG = "settings";
 #define NVS_NAMESPACE    "deskos"
 #define NVS_KEY_PINNED   "pinned"
 #define NVS_KEY_SHOWCASE "showcase"
+#define NVS_KEY_THEME    "theme"
 #define PINNED_MAX_LEN   256   /* comma-separated app ids, generous */
 #define PINNED_MAX_APPS  16
 
@@ -196,6 +197,32 @@ static void settings_set_showcase_enabled(bool enabled)
     nvs_handle_t h;
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
         nvs_set_u8(h, NVS_KEY_SHOWCASE, enabled ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+/* ROADMAP #32. shell_start() reads this once at boot (before any screen
+ * exists) so the whole UI comes up already in the right theme; this file
+ * reads it again only to draw the switch's initial state. Default true
+ * (dark) — matches the look every device had before this setting existed,
+ * so upgrading firmware never silently changes anyone's theme. */
+bool settings_theme_is_dark(void)
+{
+    nvs_handle_t h;
+    uint8_t v = 1;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, NVS_KEY_THEME, &v);
+        nvs_close(h);
+    }
+    return v != 0;
+}
+
+static void settings_set_theme_dark(bool dark)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, NVS_KEY_THEME, dark ? 1 : 0);
         nvs_commit(h);
         nvs_close(h);
     }
@@ -590,7 +617,7 @@ static void build_about(void)
     lv_obj_remove_flag(logo, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(logo, 48, 48);
     lv_obj_set_style_radius(logo, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(logo, lv_color_hex(0x4A9EFF), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(logo, lv_palette_main(LV_PALETTE_DEEP_PURPLE), LV_PART_MAIN);
     lv_obj_set_style_border_width(logo, 0, LV_PART_MAIN);
 
     const esp_app_desc_t *desc = esp_app_get_description();
@@ -648,6 +675,19 @@ static void sun_icon_create(lv_obj_t *parent)
     lv_obj_set_style_border_width(core, 0, LV_PART_MAIN);
 }
 
+/* Flips LVGL's default theme plus the shell's own explicitly-colored root
+ * screens (shell_apply_theme(), see shell.h for why the split is needed),
+ * then re-colors this screen's own background the same way — s_screen is
+ * exactly the kind of local override shell_apply_theme() cannot reach on its
+ * own, since it lives in this file, not shell.c. */
+static void theme_switch_changed(lv_event_t *e)
+{
+    const bool dark = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    settings_set_theme_dark(dark);
+    shell_apply_theme(dark);
+    lv_obj_set_style_bg_color(s_screen, shell_theme_bg(), LV_PART_MAIN);
+}
+
 static void build_display(void)
 {
     add_back_row();
@@ -671,12 +711,40 @@ static void build_display(void)
     s_brightness_editing = false;
     s_brightness_slider = lv_slider_create(s_list);
     lv_obj_set_width(s_brightness_slider, LV_PCT(100));
+    /* The list's own item spacing (pad_gap) is 0 — normal list rows butt
+     * against each other with only their own bottom border between them,
+     * but this slider is a plain object, not a list row, and its round knob
+     * draws ~6px past its own box on every side (LVGL default theme's knob
+     * style pads the circle out past the track). With zero gap that overflow
+     * bled straight into whatever sat right below it — found on hardware
+     * once the theme switch below gave it a neighbour for the first time
+     * (previously the slider was the last row, so it only overflowed into
+     * the list's own bottom padding, empty space no one saw). A margin, not
+     * padding — padding would just add inside the slider's own box, which
+     * the knob already draws past regardless. */
+    lv_obj_set_style_margin_bottom(s_brightness_slider, 10, LV_PART_MAIN);
     lv_slider_set_range(s_brightness_slider, BRIGHTNESS_MIN, 100);
     lv_slider_set_value(s_brightness_slider, bsp_backlight_get(), LV_ANIM_OFF);
     lv_obj_add_event_cb(s_brightness_slider, brightness_slider_event, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(s_brightness_slider, brightness_slider_event, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(s_brightness_slider, brightness_slider_clicked, LV_EVENT_CLICKED, NULL);
     lv_group_add_obj(s_group, s_brightness_slider);
+
+    /* Same label+switch shape as Apps' Showcase mode row below — a toggle
+     * needs no contrast judgment call, unlike the checkmark this project
+     * already moved away from once (see pin_switch_changed's comment). */
+    lv_obj_t *theme_row = lv_list_add_button(s_list, NULL, NULL);
+    lv_obj_remove_flag(theme_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *theme_label = lv_label_create(theme_row);
+    lv_obj_set_flex_grow(theme_label, 1);
+    lv_label_set_text(theme_label, "Dark theme");
+    lv_obj_t *theme_sw = lv_switch_create(theme_row);
+    lv_obj_set_size(theme_sw, 28, 14);
+    if (settings_theme_is_dark()) {
+        lv_obj_add_state(theme_sw, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(theme_sw, theme_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_group_add_obj(s_group, theme_sw);
 }
 
 static void build_network(void)
@@ -984,7 +1052,7 @@ esp_err_t settings_open(void)
 
     s_prev_screen = lv_screen_active();
     s_screen = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(s_screen, lv_color_hex(0x101418), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_screen, shell_theme_bg(), LV_PART_MAIN);
     lv_obj_remove_flag(s_screen, LV_OBJ_FLAG_SCROLLABLE);
 
     s_list = lv_list_create(s_screen);
