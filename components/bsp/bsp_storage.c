@@ -113,6 +113,20 @@ void bsp_sd_info(char *name_out, size_t name_size, uint32_t *capacity_mb)
     *capacity_mb = (uint32_t)(((uint64_t)s_card->csd.capacity * s_card->csd.sector_size) / (1024 * 1024));
 }
 
+void bsp_sd_usage(size_t *used_kb, size_t *total_kb)
+{
+    *used_kb = 0;
+    *total_kb = 0;
+    if (!s_sd_mounted) {
+        return;
+    }
+    uint64_t total = 0, free_bytes = 0;
+    if (esp_vfs_fat_info(BSP_SD_MOUNT_POINT, &total, &free_bytes) == ESP_OK) {
+        *total_kb = (size_t)(total / 1024);
+        *used_kb = (size_t)((total - free_bytes) / 1024);
+    }
+}
+
 esp_err_t bsp_sd_unmount(void)
 {
     if (!s_sd_mounted) {

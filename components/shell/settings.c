@@ -397,7 +397,7 @@ static void refresh_tick(lv_timer_t *timer)
     (void)timer;
     if (s_heap_label) {
         char buf[32];
-        snprintf(buf, sizeof(buf), "Free heap: %lu KB",
+        snprintf(buf, sizeof(buf), "Free memory: %lu KB",
                  (unsigned long)(esp_get_free_heap_size() / 1024));
         lv_label_set_text(s_heap_label, buf);
     }
@@ -597,6 +597,39 @@ static void build_menu(void)
     }
 }
 
+/* lv_list_add_text()'s default LVGL theme styling paints a grey background
+ * block behind the text (lv_theme_default.c's lv_list_text_class handling) —
+ * every plain info line on this screen reads as its own separate chip
+ * instead of just being text. Every info/status line below goes through
+ * this instead of the raw call so none of them get that box; a caller that
+ * also wants a non-default text color (e.g. a warning) still sets that
+ * itself on the object this returns. */
+static lv_obj_t *list_text(const char *txt)
+{
+    lv_obj_t *label = lv_list_add_text(s_list, txt);
+    lv_obj_set_style_bg_opa(label, LV_OPA_TRANSP, LV_PART_MAIN);
+    return label;
+}
+
+/* A thin rule between sections of the same view (SD / internal storage /
+ * memory on Storage) — plain lv_obj, not a list row, so it takes no part in
+ * button navigation. */
+static void add_divider(void)
+{
+    lv_obj_t *d = lv_obj_create(s_list);
+    lv_obj_remove_flag(d, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(d, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_width(d, LV_PCT(100));
+    lv_obj_set_height(d, 1);
+    lv_obj_set_style_bg_opa(d, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(d, lv_palette_main(LV_PALETTE_GREY), LV_PART_MAIN);
+    lv_obj_set_style_border_width(d, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(d, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(d, 0, LV_PART_MAIN);
+    lv_obj_set_style_margin_top(d, 6, LV_PART_MAIN);
+    lv_obj_set_style_margin_bottom(d, 6, LV_PART_MAIN);
+}
+
 /* Logo placeholder — no real asset yet (see ROADMAP #28 on the lack of any
  * icon pipeline at all), just a coloured circle reserving the spot at the
  * top of the device identity screen. */
@@ -624,15 +657,15 @@ static void build_about(void)
     char line[64];
 
     snprintf(line, sizeof(line), "Device: %s", desc->project_name);
-    lv_list_add_text(s_list, line);
+    list_text(line);
 
     snprintf(line, sizeof(line), "Firmware: %s", desc->version);
-    lv_list_add_text(s_list, line);
+    list_text(line);
 
     s_ota_btn = lv_list_add_button(s_list, NULL, "Check for update");
     lv_obj_add_event_cb(s_ota_btn, ota_clicked, LV_EVENT_CLICKED, NULL);
     lv_group_add_obj(s_group, s_ota_btn);
-    s_ota_status_label = lv_list_add_text(s_list, "");
+    s_ota_status_label = list_text("");
 }
 
 /* LVGL's built-in symbol font (lv_symbol_def.h) has no sun/brightness glyph,
@@ -762,28 +795,69 @@ static void build_network(void)
     wifi_label_update();
 }
 
+/* ROADMAP #37 — a bar alongside the KB numbers already printed above it, not
+ * instead of them (the numbers are exact, the bar is just faster to read at
+ * a glance). Plain lv_bar, not added to s_group: a read-only gauge, nothing
+ * to select or step with B1/B2, same as the heap/KB text lines next to it. */
+static void add_usage_bar(size_t used_kb, size_t total_kb)
+{
+    const uint8_t pct = total_kb > 0 ? (uint8_t)((used_kb * 100) / total_kb) : 0;
+
+    lv_obj_t *row = lv_obj_create(s_list);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 8, LV_PART_MAIN);
+
+    lv_obj_t *bar = lv_bar_create(row);
+    lv_obj_set_flex_grow(bar, 1);
+    lv_obj_set_height(bar, 10);
+    lv_bar_set_range(bar, 0, 100);
+    lv_bar_set_value(bar, pct, LV_ANIM_OFF);
+
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%u%%", pct);
+    lv_obj_t *pct_label = lv_label_create(row);
+    lv_label_set_text(pct_label, buf);
+}
+
 static void build_storage(void)
 {
     add_back_row();
 
     char line[64];
 
-    lv_list_add_text(s_list, bsp_sd_is_mounted() ? "SD card: mounted" : "SD card: not present");
+    /* No card at all is not worth a line of its own here — Full list/Apps
+     * already say so wherever the absence actually matters (no apps to
+     * scan, nothing to pin). This screen just shows what there is to show. */
     if (bsp_sd_is_mounted()) {
         char name[32];
         uint32_t capacity_mb = 0;
         bsp_sd_info(name, sizeof(name), &capacity_mb);
         snprintf(line, sizeof(line), "SD: %s, %lu MB", name, (unsigned long)capacity_mb);
-        lv_list_add_text(s_list, line);
+        list_text(line);
+
+        size_t sd_used_kb = 0, sd_total_kb = 0;
+        bsp_sd_usage(&sd_used_kb, &sd_total_kb);
+        add_usage_bar(sd_used_kb, sd_total_kb);
+
+        add_divider();
     }
 
     size_t used_kb = 0, total_kb = 0;
     bsp_fs_usage(&used_kb, &total_kb);
     snprintf(line, sizeof(line), "Internal storage: %u/%u KB",
              (unsigned)used_kb, (unsigned)total_kb);
-    lv_list_add_text(s_list, line);
+    list_text(line);
+    add_usage_bar(used_kb, total_kb);
 
-    s_heap_label = lv_list_add_text(s_list, "");
+    add_divider();
+
+    s_heap_label = list_text("");
 }
 
 /* The actual scan (blocking SD card I/O — main.c's own boot-time call is not
@@ -944,7 +1018,7 @@ static void build_apps(void)
         char dir[32], reason[48], line[96];
         app_registry_get_error(i, dir, sizeof(dir), reason, sizeof(reason));
         snprintf(line, sizeof(line), "%s %s: %s", LV_SYMBOL_WARNING, dir, reason);
-        lv_obj_t *warn = lv_list_add_text(s_list, line);
+        lv_obj_t *warn = list_text(line);
         lv_obj_set_style_text_color(warn, lv_color_hex(0xc9a227), LV_PART_MAIN);
     }
 
@@ -963,7 +1037,7 @@ static void build_apps(void)
     lv_obj_add_event_cb(showcase_sw, showcase_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
     lv_group_add_obj(group, showcase_sw);
 
-    lv_list_add_text(s_list, "Pinned on Home:");
+    list_text("Pinned on Home:");
     const size_t n = app_registry_count();
     for (size_t i = 0; i < n; i++) {
         const app_info_t *app = app_registry_get(i);
