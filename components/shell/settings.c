@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
 #include "esp_system.h"
+#include "fetch.h"
 #include "lvgl.h"
 #include "net.h"
 #include "nvs.h"
@@ -75,6 +76,7 @@ static lv_obj_t   *s_tz_btn;              /* Network */
 static lv_obj_t   *s_wifi_btn;            /* Network */
 static lv_obj_t   *s_ota_btn;             /* About */
 static lv_obj_t   *s_ota_status_label;    /* About */
+static lv_obj_t   *s_fetch_status_label;  /* Apps */
 static lv_obj_t   *s_ram_arc;             /* Storage */
 static lv_obj_t   *s_ram_pct_label;       /* Storage */
 
@@ -568,6 +570,48 @@ static void ota_clicked(lv_event_t *e)
         return;
     }
     ota_check_and_update(ota_status_cb);
+}
+
+/* -------------------------------------------------------------------- Fetch */
+
+/* Same shape as ota_status_cb above — runs on fetch's own task, must take
+ * the lock itself, guards against the label already being gone. */
+static void fetch_status_cb(fetch_state_t state, int percent, const char *detail)
+{
+    char buf[64];
+    switch (state) {
+    case FETCH_CONNECTING:
+        snprintf(buf, sizeof(buf), "Fetch: %s...", detail ? detail : "connecting");
+        break;
+    case FETCH_DOWNLOADING:
+        snprintf(buf, sizeof(buf), "Fetch: %d%%", percent);
+        break;
+    case FETCH_DONE:
+        snprintf(buf, sizeof(buf), "Fetch: done");
+        break;
+    case FETCH_ERROR:
+        snprintf(buf, sizeof(buf), "Fetch failed: %s", detail ? detail : "?");
+        break;
+    default:
+        buf[0] = '\0';
+        break;
+    }
+
+    if (lvgl_port_lock(200)) {
+        if (s_fetch_status_label) {
+            lv_label_set_text(s_fetch_status_label, buf);
+        }
+        lvgl_port_unlock();
+    }
+}
+
+static void fetch_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (fetch_is_running()) {
+        return;
+    }
+    fetch_run(fetch_status_cb);
 }
 
 /* ------------------------------------------------------------------ views */
@@ -1114,6 +1158,15 @@ static void build_apps(void)
     lv_obj_add_event_cb(rescan_btn, rescan_clicked, LV_EVENT_CLICKED, NULL);
     lv_group_add_obj(s_group, rescan_btn);
 
+    /* Pushes whatever /sd/fetch.json currently lists (icons today, a
+     * downloaded app tomorrow — see fetch.h) onto the card over WiFi,
+     * instead of the physical card-swap every other SD file on this device
+     * has needed so far. Same button+status-label shape as OTA above. */
+    lv_obj_t *fetch_btn = lv_list_add_button(s_list, LV_SYMBOL_DOWNLOAD, "Fetch to SD card");
+    lv_obj_add_event_cb(fetch_btn, fetch_clicked, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(s_group, fetch_btn);
+    s_fetch_status_label = list_text("");
+
     /* A manifest.json that failed to load (ROADMAP #18) — a directory with
      * no manifest.json at all is not reported here, see app_registry.h. */
     const size_t err_n = app_registry_error_count();
@@ -1204,6 +1257,7 @@ static void show_view(settings_view_t view)
     s_wifi_btn = NULL;
     s_ota_btn = NULL;
     s_ota_status_label = NULL;
+    s_fetch_status_label = NULL;
     s_ram_arc = NULL;
     s_ram_pct_label = NULL;
 
@@ -1291,6 +1345,7 @@ void settings_close(void)
     s_wifi_btn = NULL;
     s_ota_btn = NULL;
     s_ota_status_label = NULL;
+    s_fetch_status_label = NULL;
     s_ram_arc = NULL;
     s_ram_pct_label = NULL;
     s_delete_trigger_btn = NULL;

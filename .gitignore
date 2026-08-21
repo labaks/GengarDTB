@@ -11,6 +11,7 @@ sdkconfig.ci
 # Never commit the flash dump — it contains WiFi credentials from NVS.
 *.bin
 !apps/**/*.bin
+!assets/icons/**/*.bin
 
 # Secrets: WiFi credentials, API keys for widgets during development.
 secrets.h

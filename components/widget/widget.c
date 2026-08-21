@@ -158,15 +158,29 @@ static void apply_numeric(lv_obj_t *obj, wview_kind_t kind, const char *tmpl, co
 }
 
 /* "A" is CONFIG_LV_FS_STDIO_LETTER (65) — LVGL's stdio fs driver strips the
- * "A:" prefix and fopen()s the rest, so this is just the app's own directory
- * with a drive letter glued on front. */
+ * "A:" prefix and fopen()s the rest, so this is normally just the app's own
+ * directory with a drive letter glued on front.
+ *
+ * A leading '/' in src is passed through as an absolute path instead
+ * (A:<src>, not A:<dir>/<src>). Needed for a builtin app: its own dir is
+ * always /fs/apps/<id> on flash-backed LittleFS (extracted from
+ * EMBED_TXTFILES at boot, see main/builtin), but icon assets must stay
+ * off flash entirely (CLAUDE.md, "Что НЕ делать") — the only place they can
+ * live is the SD card, at a path with nothing to do with a builtin app's own
+ * (flash) directory. A user app's own dir is already on SD, so this is a
+ * no-op for it — plain relative src still resolves next to its own
+ * ui.jsonl, same as before. */
 static void image_apply(lv_obj_t *obj, const char *filename)
 {
     if (!obj || !filename || !*filename || !s_app) {
         return;
     }
     char path[192];
-    snprintf(path, sizeof(path), "A:%s/%s", s_app->dir, filename);
+    if (filename[0] == '/') {
+        snprintf(path, sizeof(path), "A:%s", filename);
+    } else {
+        snprintf(path, sizeof(path), "A:%s/%s", s_app->dir, filename);
+    }
     lv_image_set_src(obj, path);
 }
 

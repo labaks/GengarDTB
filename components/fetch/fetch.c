@@ -1,0 +1,201 @@
+#include "fetch.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+
+#include "bsp_pins.h"
+#include "cJSON.h"
+#include "esp_http_client.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+static const char *TAG = "fetch";
+
+static volatile bool s_running;
+
+/* Creates every missing directory in path's parent chain (e.g. for
+ * "/sd/icons/weather/a.bin" that's /sd, /sd/icons, /sd/icons/weather).
+ * FATFS's mkdir() has no -p option and errors on an existing directory —
+ * both are fine here, only a genuine failure to create a missing one
+ * matters. path is modified in place and restored before returning. */
+static void mkdir_p_parent(char *path)
+{
+    for (char *p = path + 1; *p; p++) {
+        if (*p != '/') {
+            continue;
+        }
+        *p = '\0';
+        mkdir(path, 0777);   /* ignore EEXIST and everything else — the
+                               * fopen() right after this is the real check */
+        *p = '/';
+    }
+}
+
+typedef struct {
+    FILE  *file;
+    size_t written;
+} sink_t;
+
+static esp_err_t http_event(esp_http_client_event_t *evt)
+{
+    sink_t *sink = evt->user_data;
+    if (evt->event_id != HTTP_EVENT_ON_DATA || !sink || !sink->file) {
+        return ESP_OK;
+    }
+    if (fwrite(evt->data, 1, evt->data_len, sink->file) != (size_t)evt->data_len) {
+        ESP_LOGE(TAG, "short write to disk (out of space?)");
+        return ESP_FAIL;
+    }
+    sink->written += evt->data_len;
+    return ESP_OK;
+}
+
+/* One url->dest pair. Returns true on success; on failure the partial file
+ * (if any bytes made it to disk) is removed rather than left half-written. */
+static bool fetch_one(const char *url, const char *dest)
+{
+    char dir_buf[192];
+    snprintf(dir_buf, sizeof(dir_buf), "%s", dest);
+    mkdir_p_parent(dir_buf);
+
+    sink_t sink = { .file = fopen(dest, "wb"), .written = 0 };
+    if (!sink.file) {
+        ESP_LOGE(TAG, "cannot open '%s' for writing", dest);
+        return false;
+    }
+
+    const esp_http_client_config_t cfg = {
+        .url               = url,
+        .method            = HTTP_METHOD_GET,
+        .event_handler     = http_event,
+        .user_data         = &sink,
+        .timeout_ms        = 10000,
+        .buffer_size       = 2048,
+        .disable_auto_redirect = true,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        fclose(sink.file);
+        remove(dest);
+        return false;
+    }
+
+    const esp_err_t err = esp_http_client_perform(client);
+    const int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    fclose(sink.file);
+
+    if (err != ESP_OK || status != 200) {
+        ESP_LOGE(TAG, "GET '%s' failed: %s (HTTP %d)", url, esp_err_to_name(err), status);
+        remove(dest);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "wrote %s (%u bytes)", dest, (unsigned)sink.written);
+    return true;
+}
+
+/* {"items":[{"url":"...","dest":"..."}]} on the card — same convention as
+ * /sd/wifi.json (#8) and /sd/ota.json (#17): a file, not something typed on
+ * a keyboard this device does not have. */
+static cJSON *load_manifest(void)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "%s/fetch.json", BSP_SD_MOUNT_POINT);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return NULL;
+    }
+    char *buf = malloc(4096);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    const size_t n = fread(buf, 1, 4095, f);
+    fclose(f);
+    buf[n] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    return root;
+}
+
+static void fetch_task(void *arg)
+{
+    const fetch_progress_cb_t cb = (fetch_progress_cb_t)arg;
+
+    cJSON *root = load_manifest();
+    const cJSON *items = root ? cJSON_GetObjectItem(root, "items") : NULL;
+    if (!cJSON_IsArray(items)) {
+        ESP_LOGW(TAG, "no /sd/fetch.json (or no 'items' array) — nothing to fetch");
+        if (cb) {
+            cb(FETCH_ERROR, 0, "no /sd/fetch.json");
+        }
+        cJSON_Delete(root);
+        goto done;
+    }
+
+    {
+        const int total = cJSON_GetArraySize(items);
+        int done_count = 0;
+        int failed = 0;
+        const cJSON *item;
+        cJSON_ArrayForEach(item, items) {
+            const char *url = cJSON_GetStringValue(cJSON_GetObjectItem(item, "url"));
+            const char *dest = cJSON_GetStringValue(cJSON_GetObjectItem(item, "dest"));
+            if (!url || !dest) {
+                failed++;
+                continue;
+            }
+            if (cb) {
+                cb(FETCH_CONNECTING, (int)(((int64_t)done_count * 100) / total), dest);
+            }
+            if (!fetch_one(url, dest)) {
+                failed++;
+            }
+            done_count++;
+            if (cb) {
+                cb(FETCH_DOWNLOADING, (int)(((int64_t)done_count * 100) / total), dest);
+            }
+        }
+        cJSON_Delete(root);
+
+        if (cb) {
+            if (failed > 0) {
+                char detail[32];
+                snprintf(detail, sizeof(detail), "%d/%d failed", failed, total);
+                cb(FETCH_ERROR, 100, detail);
+            } else {
+                cb(FETCH_DONE, 100, NULL);
+            }
+        }
+    }
+
+done:
+    s_running = false;
+    vTaskDelete(NULL);
+}
+
+void fetch_run(fetch_progress_cb_t cb)
+{
+    if (s_running) {
+        return;
+    }
+    s_running = true;
+    /* Stack sized like ota's own download task (8192) — same shape of work
+     * (esp_http_client + a JSON parse), just to a plain file instead of a
+     * partition. */
+    if (xTaskCreate(fetch_task, "fetch", 8192, (void *)cb, 3, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "cannot start fetch task");
+        s_running = false;
+    }
+}
+
+bool fetch_is_running(void)
+{
+    return s_running;
+}

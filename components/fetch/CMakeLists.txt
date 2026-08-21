@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "fetch.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        bsp
+        json
+        esp_http_client
+)

@@ -1,0 +1,68 @@
+{
+  "items": [
+    {
+      "url": "http://<pc-ip>:8000/clear_day.bin",
+      "dest": "/sd/icons/weather/clear_day.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/cloudy.bin",
+      "dest": "/sd/icons/weather/cloudy.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/drizzle.bin",
+      "dest": "/sd/icons/weather/drizzle.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/flurries.bin",
+      "dest": "/sd/icons/weather/flurries.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/haze_fog_dust_smoke.bin",
+      "dest": "/sd/icons/weather/haze_fog_dust_smoke.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/heavy_rain.bin",
+      "dest": "/sd/icons/weather/heavy_rain.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/heavy_snow.bin",
+      "dest": "/sd/icons/weather/heavy_snow.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/icy.bin",
+      "dest": "/sd/icons/weather/icy.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/isolated_thunderstorms.bin",
+      "dest": "/sd/icons/weather/isolated_thunderstorms.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/mostly_clear_day.bin",
+      "dest": "/sd/icons/weather/mostly_clear_day.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/partly_cloudy_day.bin",
+      "dest": "/sd/icons/weather/partly_cloudy_day.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/rain_with_cloudy.bin",
+      "dest": "/sd/icons/weather/rain_with_cloudy.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/scattered_snow_showers_day.bin",
+      "dest": "/sd/icons/weather/scattered_snow_showers_day.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/showers_rain.bin",
+      "dest": "/sd/icons/weather/showers_rain.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/snow_with_cloudy.bin",
+      "dest": "/sd/icons/weather/snow_with_cloudy.bin"
+    },
+    {
+      "url": "http://<pc-ip>:8000/thunderstorms.bin",
+      "dest": "/sd/icons/weather/thunderstorms.bin"
+    }
+  ]
+}

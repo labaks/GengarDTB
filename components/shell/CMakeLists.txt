@@ -12,6 +12,7 @@ idf_component_register(
         net
         host
         ota
+        fetch
         esp_lcd
         nvs_flash
         esp_app_format
