@@ -47,6 +47,12 @@ esp_err_t net_set_credentials(const char *ssid, const char *password);
 /* Copies the SSID currently in use. False when none is configured. */
 bool net_get_ssid(char *out, size_t out_size);
 
+/* Copies the STA IP address as dotted-decimal text (e.g. "192.168.1.100").
+ * False when not currently associated (net_state() != NET_UP) — there is no
+ * address worth showing then. ROADMAP #45: the on-demand web config server
+ * needs this to tell the user where to point a browser. */
+bool net_get_ip(char *out, size_t out_size);
+
 /* Persists a POSIX TZ string to NVS and applies it immediately (setenv+tzset) —
  * takes effect on the very next localtime() call, no reboot needed. The
  * build-time fallback is CONFIG_DESKOS_TZ. See Kconfig.projbuild for the

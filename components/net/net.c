@@ -41,6 +41,7 @@ static char           s_ssid[33];
 static char           s_pass[65];
 static uint32_t       s_retry_ms = RETRY_MIN_MS;
 static bool           s_time_valid;
+static esp_netif_t   *s_sta_netif;
 
 static void set_state(net_state_t st)
 {
@@ -209,6 +210,19 @@ bool net_get_ssid(char *out, size_t out_size)
         return false;
     }
     snprintf(out, out_size, "%s", s_ssid);
+    return true;
+}
+
+bool net_get_ip(char *out, size_t out_size)
+{
+    if (!out || out_size == 0 || s_state != NET_UP || !s_sta_netif) {
+        return false;
+    }
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(s_sta_netif, &ip_info) != ESP_OK) {
+        return false;
+    }
+    snprintf(out, out_size, IPSTR, IP2STR(&ip_info.ip));
     return true;
 }
 
@@ -556,7 +570,7 @@ esp_err_t net_init(void)
 {
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif init");
     ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop");
-    esp_netif_create_default_wifi_sta();
+    s_sta_netif = esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&init_cfg), TAG, "wifi init");

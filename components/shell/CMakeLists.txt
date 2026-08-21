@@ -6,6 +6,7 @@ idf_component_register(
         "include"
     REQUIRES
         bsp
+        json
         input
         registry
         widget
@@ -13,6 +14,7 @@ idf_component_register(
         host
         ota
         fetch
+        webcfg
         esp_lcd
         nvs_flash
         esp_app_format

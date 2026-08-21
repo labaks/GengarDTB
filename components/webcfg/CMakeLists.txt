@@ -1,0 +1,11 @@
+idf_component_register(
+    SRCS
+        "webcfg.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        bsp
+        json
+        esp_http_server
+        net
+)

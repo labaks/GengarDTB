@@ -5,6 +5,7 @@
 
 #include "app_registry.h"
 #include "bsp.h"
+#include "cJSON.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -16,6 +17,7 @@
 #include "nvs.h"
 #include "ota.h"
 #include "shell.h"
+#include "webcfg.h"
 
 static const char *TAG = "settings";
 
@@ -74,6 +76,7 @@ static lv_group_t *s_group;
 static lv_obj_t   *s_brightness_slider;   /* Display */
 static lv_obj_t   *s_tz_btn;              /* Network */
 static lv_obj_t   *s_wifi_btn;            /* Network */
+static lv_obj_t   *s_webcfg_btn;          /* Network */
 static lv_obj_t   *s_ota_btn;             /* About */
 static lv_obj_t   *s_ota_status_label;    /* About */
 static lv_obj_t   *s_ota_confirm_btn;     /* About */
@@ -387,6 +390,37 @@ static void wifi_label_update(void)
         snprintf(line, sizeof(line), "WiFi: not configured (tap to set up)");
     }
     lv_list_set_button_text(s_list, s_wifi_btn, line);
+}
+
+/* ROADMAP #45. Not refreshed by refresh_tick() the way wifi_label_update()
+ * is — nothing changes this state except a tap on the row itself, no
+ * background process can flip it out from under the label the way
+ * reconnect-after-SoftAP could for WiFi. */
+static void webcfg_label_update(void)
+{
+    char line[64];
+    if (webcfg_is_running()) {
+        char ip[16];
+        if (net_get_ip(ip, sizeof(ip))) {
+            snprintf(line, sizeof(line), "Web config: http://%s:%d (tap to stop)", ip, WEBCFG_PORT);
+        } else {
+            snprintf(line, sizeof(line), "Web config: running (tap to stop)");
+        }
+    } else {
+        snprintf(line, sizeof(line), "Web config: off (tap to start)");
+    }
+    lv_list_set_button_text(s_list, s_webcfg_btn, line);
+}
+
+static void webcfg_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (webcfg_is_running()) {
+        webcfg_stop();
+    } else {
+        webcfg_start();
+    }
+    webcfg_label_update();
 }
 
 /* A bare "NN KB free" is not informative on its own — free of what? — same
@@ -825,9 +859,32 @@ static void build_about(void)
     lv_obj_set_style_border_width(logo, 0, LV_PART_MAIN);
 
     const esp_app_desc_t *desc = esp_app_get_description();
-    char line[64];
+    char line[96];
 
-    snprintf(line, sizeof(line), "Device: %s", desc->project_name);
+    /* ROADMAP #38.2/#45: /sd/device.json ({"name":"..."}), same convention
+     * as every other SD config file — falls back to the build's own project
+     * name (the only name that ever existed before #45's web form gave
+     * device.json a way to get written without a card swap). */
+    char device_name[64];
+    snprintf(line, sizeof(line), "%s/device.json", BSP_SD_MOUNT_POINT);
+    FILE *dnf = fopen(line, "rb");
+    const char *name = desc->project_name;
+    if (dnf) {
+        char buf[128];
+        const size_t n = fread(buf, 1, sizeof(buf) - 1, dnf);
+        fclose(dnf);
+        buf[n] = '\0';
+        cJSON *root = cJSON_Parse(buf);
+        if (root) {
+            const char *v = cJSON_GetStringValue(cJSON_GetObjectItem(root, "name"));
+            if (v && *v) {
+                snprintf(device_name, sizeof(device_name), "%s", v);
+                name = device_name;
+            }
+            cJSON_Delete(root);
+        }
+    }
+    snprintf(line, sizeof(line), "Device: %s", name);
     list_text(line);
 
     snprintf(line, sizeof(line), "Firmware: %s", desc->version);
@@ -974,6 +1031,11 @@ static void build_network(void)
     lv_obj_add_event_cb(s_wifi_btn, wifi_clicked, LV_EVENT_CLICKED, NULL);
     lv_group_add_obj(s_group, s_wifi_btn);
     wifi_label_update();
+
+    s_webcfg_btn = lv_list_add_button(s_list, NULL, "");
+    lv_obj_add_event_cb(s_webcfg_btn, webcfg_clicked, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(s_group, s_webcfg_btn);
+    webcfg_label_update();
 }
 
 /* KB is fine for the internal LittleFS partition (hundreds of KB, see
@@ -1334,6 +1396,7 @@ static void show_view(settings_view_t view)
     s_brightness_editing = false;
     s_tz_btn = NULL;
     s_wifi_btn = NULL;
+    s_webcfg_btn = NULL;
     s_ota_btn = NULL;
     s_ota_confirm_btn = NULL;
     s_ota_status_label = NULL;
@@ -1423,6 +1486,7 @@ void settings_close(void)
     s_brightness_editing = false;
     s_tz_btn = NULL;
     s_wifi_btn = NULL;
+    s_webcfg_btn = NULL;
     s_ota_btn = NULL;
     s_ota_confirm_btn = NULL;
     s_ota_status_label = NULL;
