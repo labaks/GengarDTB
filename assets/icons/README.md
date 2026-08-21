@@ -89,9 +89,12 @@ existed.
 
 ## logo.bin
 
-Settings → About device (ROADMAP #46). Source: user-provided pixel-art
-silhouette (`D:/Pictures/logo.png`, 31×27, flat black on transparent — not
-part of this repo). Converted with `tools/icon_convert.py`'s PNG path at an
+Settings → About device (ROADMAP #46). Source: **original artwork drawn by
+the user** (`D:/Pictures/logo.png`, 31×27, flat black on transparent — not
+part of this repo) — a face design loosely inspired by Gengar but distinct
+from it, not a copy of any Pokémon asset. No licensing note needed here,
+unlike `weather/` above — this one isn't third-party material at all.
+Converted with `tools/icon_convert.py`'s PNG path at an
 integer `scale` of 2 (nearest-neighbour, not the SVG path's `size_px` — see
 that script's docstring for why raw pixel art needs an integer multiple
 instead of a resize to an arbitrary square) → 62×54, fits the About screen's
