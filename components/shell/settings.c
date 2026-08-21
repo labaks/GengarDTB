@@ -6,6 +6,7 @@
 #include "app_registry.h"
 #include "bsp.h"
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
 #include "esp_system.h"
@@ -73,7 +74,8 @@ static lv_obj_t   *s_tz_btn;              /* Network */
 static lv_obj_t   *s_wifi_btn;            /* Network */
 static lv_obj_t   *s_ota_btn;             /* About */
 static lv_obj_t   *s_ota_status_label;    /* About */
-static lv_obj_t   *s_heap_label;          /* Storage */
+static lv_obj_t   *s_ram_arc;             /* Storage */
+static lv_obj_t   *s_ram_pct_label;       /* Storage */
 
 /* WiFi setup sub-panel — swapped in over the list, torn down on cancel, on a
  * result settling, or on settings_close() (the system "home" shortcut can
@@ -392,15 +394,35 @@ static void wifi_label_update(void)
     lv_list_set_button_text(s_list, s_wifi_btn, line);
 }
 
+/* A bare "NN KB free" is not informative on its own — free of what? — same
+ * complaint that sent the storage bars to a Windows-style "X free of Y"
+ * caption. RAM has no natural "total" to caption it with the same way (no
+ * single obviously-right denominator: heap_caps total, PSRAM-less budget,
+ * and "what CLAUDE.md calls free after boot" are all different numbers), so
+ * this instead mirrors the built-in `system` app's CPU gauge (see
+ * main/builtin/system.ui.jsonl) — an arc + big percentage, same "% used,
+ * high is the one to worry about" reading a user has already seen there. */
+static void ram_gauge_refresh(void)
+{
+    if (!s_ram_arc) {
+        return;
+    }
+    const size_t total = heap_caps_get_total_size(MALLOC_CAP_DEFAULT);
+    const size_t free = esp_get_free_heap_size();
+    const uint8_t pct = total > 0 ? (uint8_t)(((total - free) * 100) / total) : 0;
+
+    lv_arc_set_value(s_ram_arc, pct);
+    if (s_ram_pct_label) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%u%%", pct);
+        lv_label_set_text(s_ram_pct_label, buf);
+    }
+}
+
 static void refresh_tick(lv_timer_t *timer)
 {
     (void)timer;
-    if (s_heap_label) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "Free memory: %lu KB",
-                 (unsigned long)(esp_get_free_heap_size() / 1024));
-        lv_label_set_text(s_heap_label, buf);
-    }
+    ram_gauge_refresh();
     if (s_wifi_btn) {
         wifi_label_update();
     }
@@ -608,6 +630,21 @@ static lv_obj_t *list_text(const char *txt)
 {
     lv_obj_t *label = lv_list_add_text(s_list, txt);
     lv_obj_set_style_bg_opa(label, LV_OPA_TRANSP, LV_PART_MAIN);
+    /* This device's only way to scroll IS moving keyboard focus — there is
+     * no separate scroll gesture on a 2-button board. Two things are needed
+     * for that, not just one: membership in s_group (so PREV/NEXT can land
+     * here at all) AND LV_OBJ_FLAG_SCROLL_ON_FOCUS (so landing here actually
+     * scrolls it into view — lv_obj.c only calls lv_obj_scroll_to_view_
+     * recursive() on LV_EVENT_FOCUSED when this flag is set; it is NOT
+     * something group membership grants for free). lv_button/lv_switch/
+     * lv_slider all set this themselves in their own constructors, which is
+     * exactly why every other row on every other view already scrolled
+     * correctly without anyone noticing this was two separate mechanisms —
+     * a plain lv_obj/lv_label/lv_bar/lv_arc sets neither on its own.
+     * Harmless for a row with no click handler: ENTER on it just does
+     * nothing, same as landing on any other inert row would. */
+    lv_group_add_obj(s_group, label);
+    lv_obj_add_flag(label, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
     return label;
 }
 
@@ -795,34 +832,82 @@ static void build_network(void)
     wifi_label_update();
 }
 
-/* ROADMAP #37 — a bar alongside the KB numbers already printed above it, not
- * instead of them (the numbers are exact, the bar is just faster to read at
- * a glance). Plain lv_bar, not added to s_group: a read-only gauge, nothing
- * to select or step with B1/B2, same as the heap/KB text lines next to it. */
+/* KB is fine for the internal LittleFS partition (hundreds of KB, see
+ * CLAUDE.md) but useless for an SD card sized in gigabytes — "1900544 KB
+ * free" is not a number anyone reads at a glance. Auto-picks the largest
+ * unit that keeps at least one whole unit, same rule any file manager uses. */
+static void format_kb(size_t kb, char *out, size_t out_size)
+{
+    if (kb < 1024) {
+        snprintf(out, out_size, "%u KB", (unsigned)kb);
+    } else if (kb < 1024 * 1024) {
+        snprintf(out, out_size, "%.1f MB", kb / 1024.0);
+    } else {
+        snprintf(out, out_size, "%.1f GB", kb / (1024.0 * 1024.0));
+    }
+}
+
+/* ROADMAP #37 — Windows Explorer's drive gauge shape, by direct request:
+ * a full-width bar (filled portion = used) with "X free of Y" printed below
+ * it, no percentage anywhere. Plain lv_bar, not added to s_group: a
+ * read-only gauge, nothing to select or step with B1/B2. */
 static void add_usage_bar(size_t used_kb, size_t total_kb)
 {
     const uint8_t pct = total_kb > 0 ? (uint8_t)((used_kb * 100) / total_kb) : 0;
+    const size_t free_kb = total_kb > used_kb ? total_kb - used_kb : 0;
 
+    lv_obj_t *bar = lv_bar_create(s_list);
+    lv_obj_set_width(bar, LV_PCT(100));
+    lv_obj_set_height(bar, 10);
+    lv_obj_set_style_margin_top(bar, 6, LV_PART_MAIN);
+    lv_obj_set_style_margin_bottom(bar, 6, LV_PART_MAIN);
+    lv_bar_set_range(bar, 0, 100);
+    lv_bar_set_value(bar, pct, LV_ANIM_OFF);
+    lv_group_add_obj(s_group, bar);   /* see list_text()'s comment: both calls needed */
+    lv_obj_add_flag(bar, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+
+    char free_str[16], total_str[16], buf[40];
+    format_kb(free_kb, free_str, sizeof(free_str));
+    format_kb(total_kb, total_str, sizeof(total_str));
+    snprintf(buf, sizeof(buf), "%s free of %s", free_str, total_str);
+    list_text(buf);
+}
+
+/* Same arc-plus-big-number shape as the built-in `system` app's CPU gauge
+ * (main/builtin/system.ui.jsonl) — see ram_gauge_refresh()'s own comment for
+ * why a percentage, not a bare KB figure. Default lv_arc angles (135°..45°,
+ * gap at the bottom) are the same speedometer look that widget.c's own arc
+ * view relies on for the CPU gauge — nothing to set explicitly for that. */
+static void add_memory_gauge(void)
+{
     lv_obj_t *row = lv_obj_create(s_list);
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_width(row, LV_PCT(100));
     lv_obj_set_height(row, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(row, 8, LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_bottom(row, 6, LV_PART_MAIN);
+    lv_group_add_obj(s_group, row);   /* see list_text()'s comment: both calls needed */
+    lv_obj_add_flag(row, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
 
-    lv_obj_t *bar = lv_bar_create(row);
-    lv_obj_set_flex_grow(bar, 1);
-    lv_obj_set_height(bar, 10);
-    lv_bar_set_range(bar, 0, 100);
-    lv_bar_set_value(bar, pct, LV_ANIM_OFF);
+    s_ram_arc = lv_arc_create(row);
+    lv_obj_set_size(s_ram_arc, 90, 90);
+    lv_arc_set_range(s_ram_arc, 0, 100);
+    lv_arc_set_mode(s_ram_arc, LV_ARC_MODE_NORMAL);
+    /* A passive readout, not a control — nothing here should be draggable
+     * under the resistive touch (same reasoning as widget.c's own arc view). */
+    lv_obj_remove_flag(s_ram_arc, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_color(s_ram_arc, lv_palette_main(LV_PALETTE_DEEP_PURPLE), LV_PART_INDICATOR);
 
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%u%%", pct);
-    lv_obj_t *pct_label = lv_label_create(row);
-    lv_label_set_text(pct_label, buf);
+    s_ram_pct_label = lv_label_create(s_ram_arc);
+    lv_obj_center(s_ram_pct_label);
+
+    lv_obj_t *caption = lv_label_create(row);
+    lv_label_set_text(caption, "RAM used");
+
+    ram_gauge_refresh();
 }
 
 static void build_storage(void)
@@ -830,6 +915,9 @@ static void build_storage(void)
     add_back_row();
 
     char line[64];
+
+    add_memory_gauge();
+    add_divider();
 
     /* No card at all is not worth a line of its own here — Full list/Apps
      * already say so wherever the absence actually matters (no apps to
@@ -850,14 +938,8 @@ static void build_storage(void)
 
     size_t used_kb = 0, total_kb = 0;
     bsp_fs_usage(&used_kb, &total_kb);
-    snprintf(line, sizeof(line), "Internal storage: %u/%u KB",
-             (unsigned)used_kb, (unsigned)total_kb);
-    list_text(line);
+    list_text("Internal storage");
     add_usage_bar(used_kb, total_kb);
-
-    add_divider();
-
-    s_heap_label = list_text("");
 }
 
 /* The actual scan (blocking SD card I/O — main.c's own boot-time call is not
@@ -1101,7 +1183,8 @@ static void show_view(settings_view_t view)
     s_wifi_btn = NULL;
     s_ota_btn = NULL;
     s_ota_status_label = NULL;
-    s_heap_label = NULL;
+    s_ram_arc = NULL;
+    s_ram_pct_label = NULL;
 
     switch (view) {
     case VIEW_ABOUT:   build_about();   break;
@@ -1186,7 +1269,8 @@ void settings_close(void)
     s_wifi_btn = NULL;
     s_ota_btn = NULL;
     s_ota_status_label = NULL;
-    s_heap_label = NULL;
+    s_ram_arc = NULL;
+    s_ram_pct_label = NULL;
     s_delete_trigger_btn = NULL;
 }
 
