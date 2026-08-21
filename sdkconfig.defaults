@@ -57,9 +57,81 @@ CONFIG_LV_USE_LIST=y
 CONFIG_LV_USE_IMAGE=y
 CONFIG_LV_USE_BAR=y
 CONFIG_LV_USE_ARC=y
+CONFIG_LV_USE_SWITCH=y
+CONFIG_LV_USE_SLIDER=y
+CONFIG_LV_USE_SPINNER=y
+CONFIG_LV_USE_LINE=y
 
 # Lets an "image" view load an LVGL .bin icon straight off /fs or /sd by
 # plain POSIX path (e.g. "A:/fs/apps/weather/icon.bin") — same stdio fopen()
 # already used everywhere else in this project, just wired into LVGL too.
 CONFIG_LV_USE_FS_STDIO=y
 CONFIG_LV_FS_STDIO_LETTER=65
+
+# ROADMAP #21: the comment above ("keep the rest off") was never actually
+# enforced — every one of these defaults to `y` in LVGL's own Kconfig
+# (`default y if !LV_CONF_MINIMAL`), so leaving them merely unlisted here
+# left them all compiled in anyway. liblvgl__lvgl.a is the single largest
+# component in the whole binary (381 KB); grep confirms none of these
+# classes is referenced anywhere in components/ or main/ — each is dead
+# weight from the stock widget-demo default, not something this shell,
+# widget.c, or any builtin app ever draws.
+CONFIG_LV_USE_ANIMIMG=n
+CONFIG_LV_USE_ARCLABEL=n
+CONFIG_LV_USE_BUTTONMATRIX=n
+CONFIG_LV_USE_CALENDAR=n
+CONFIG_LV_USE_CANVAS=n
+CONFIG_LV_USE_CHART=n
+CONFIG_LV_USE_CHECKBOX=n
+CONFIG_LV_USE_DROPDOWN=n
+CONFIG_LV_USE_IMAGEBUTTON=n
+CONFIG_LV_USE_KEYBOARD=n
+CONFIG_LV_USE_LED=n
+CONFIG_LV_USE_MENU=n
+CONFIG_LV_USE_MSGBOX=n
+CONFIG_LV_USE_ROLLER=n
+CONFIG_LV_USE_SCALE=n
+CONFIG_LV_USE_SPAN=n
+CONFIG_LV_USE_SPINBOX=n
+CONFIG_LV_USE_TABLE=n
+CONFIG_LV_USE_TABVIEW=n
+CONFIG_LV_USE_TEXTAREA=n
+CONFIG_LV_USE_TILEVIEW=n
+CONFIG_LV_USE_WIN=n
+# Only the default theme is ever applied (shell_apply_theme(), ROADMAP #32) —
+# the simple theme is a separate, never-instantiated implementation.
+CONFIG_LV_USE_THEME_SIMPLE=n
+# Every layout in this codebase is CONFIG_LV_USE_FLEX; no lv_grid_* call exists.
+CONFIG_LV_USE_GRID=n
+# Subject/observer style bindings — not used, this project sets styles directly.
+CONFIG_LV_USE_OBSERVER=n
+# LVGL's own demo/example tree (never referenced by this project — it links
+# out anyway under --gc-sections, but disabling widgets above means some of
+# its examples now reference APIs (lv_checkbox_create et al.) that no longer
+# exist, which is a build failure, not just dead weight to strip later).
+CONFIG_LV_BUILD_EXAMPLES=n
+
+# --- TLS: flash matters more here than covering every CA/cipher on earth ---
+# The full bundle is ~69 KB of the ~1.66 MB OTA slot for CA certs alone; the
+# common-only bundle is Espressif's own documented "still ~99% coverage"
+# subset, roughly half the size. Not expected to change the existing
+# open-meteo TLS failure either way (see CLAUDE.md "Открытые вопросы" — that
+# one fails signature verification on a cert the bundle already matched, so
+# which CAs are present isn't the variable at play there).
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=n
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
+# Static ECDH ciphersuites (as opposed to ECDHE) are a relic no server we talk
+# to negotiates in practice — every real TLS deployment uses ECDHE for
+# forward secrecy. ECDHE_RSA/ECDHE_ECDSA (kept) already cover the real world.
+CONFIG_MBEDTLS_KEY_EXCHANGE_ECDH_ECDSA=n
+CONFIG_MBEDTLS_KEY_EXCHANGE_ECDH_RSA=n
+# Koblitz and Brainpool curves: essentially never offered by a real-world
+# HTTPS server (they exist mainly for niche/government PKI). The NIST
+# P-256/P-384/P-521 and Curve25519 curves this leaves enabled already cover
+# every server this device actually talks to (open-meteo, frankfurter.dev).
+CONFIG_MBEDTLS_ECP_DP_SECP192K1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_SECP224K1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_SECP256K1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_BP256R1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_BP384R1_ENABLED=n
+CONFIG_MBEDTLS_ECP_DP_BP512R1_ENABLED=n
