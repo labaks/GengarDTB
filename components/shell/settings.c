@@ -51,6 +51,7 @@ typedef enum {
     VIEW_ABOUT,
     VIEW_DISPLAY,
     VIEW_NETWORK,
+    VIEW_TZ,       /* nested under Network, ROADMAP #36 */
     VIEW_STORAGE,
     VIEW_APPS,
 } settings_view_t;
@@ -350,15 +351,6 @@ static void tz_label_update(void)
     lv_list_set_button_text(s_list, s_tz_btn, buf);
 }
 
-static void tz_clicked(lv_event_t *e)
-{
-    (void)e;
-    const int idx = tz_preset_index_of_current();
-    const int next = (idx + 1 >= TZ_PRESET_COUNT) ? 0 : idx + 1;
-    net_set_timezone(TZ_PRESETS[next].tz);
-    tz_label_update();
-}
-
 /* lv_switch instead of a colored checkmark — the checkmark attempt (see git
  * history) read as "selected" rather than "off/dim", and the pinned one's
  * white was unreadable against the row's own focus highlight. A toggle needs
@@ -582,23 +574,52 @@ static void ota_clicked(lv_event_t *e)
 
 static void show_view(settings_view_t view);
 
-static void back_clicked(lv_event_t *e)
-{
-    (void)e;
-    show_view(VIEW_MENU);
-}
-
-static void add_back_row(void)
-{
-    lv_obj_t *btn = lv_list_add_button(s_list, LV_SYMBOL_LEFT, "Back");
-    lv_obj_add_event_cb(btn, back_clicked, LV_EVENT_CLICKED, NULL);
-    lv_group_add_obj(s_group, btn);
-}
-
+/* Also used directly by category_clicked below — "Back" is just a jump to a
+ * fixed target view, the same thing a Full list category row does with its
+ * own target. ROADMAP #36 needed a "Back" that returns to Network rather
+ * than always Menu (a nested list under Network, not a top-level category),
+ * which is why this takes the target as a parameter instead of hardcoding
+ * VIEW_MENU the way it used to. */
 static void category_clicked(lv_event_t *e)
 {
     const settings_view_t view = (settings_view_t)(intptr_t)lv_event_get_user_data(e);
     show_view(view);
+}
+
+static void add_back_row(settings_view_t target)
+{
+    lv_obj_t *btn = lv_list_add_button(s_list, LV_SYMBOL_LEFT, "Back");
+    lv_obj_add_event_cb(btn, category_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)target);
+    lv_group_add_obj(s_group, btn);
+}
+
+/* ROADMAP #36: was a click-to-cycle-through-presets row; a real list (one
+ * row per preset, current one marked) reads better once there are more than
+ * two or three presets to choose from and matches how every other
+ * multiple-choice setting on this screen already works. */
+static void tz_clicked(lv_event_t *e)
+{
+    (void)e;
+    show_view(VIEW_TZ);
+}
+
+static void tz_preset_clicked(lv_event_t *e)
+{
+    const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    net_set_timezone(TZ_PRESETS[idx].tz);
+    show_view(VIEW_NETWORK);
+}
+
+static void build_tz(void)
+{
+    add_back_row(VIEW_NETWORK);
+
+    const int current = tz_preset_index_of_current();
+    for (int i = 0; i < TZ_PRESET_COUNT; i++) {
+        lv_obj_t *btn = lv_list_add_button(s_list, i == current ? LV_SYMBOL_OK : NULL, TZ_PRESETS[i].name);
+        lv_obj_add_event_cb(btn, tz_preset_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_group_add_obj(s_group, btn);
+    }
 }
 
 static void build_menu(void)
@@ -672,7 +693,7 @@ static void add_divider(void)
  * top of the device identity screen. */
 static void build_about(void)
 {
-    add_back_row();
+    add_back_row(VIEW_MENU);
 
     lv_obj_t *logo_row = lv_obj_create(s_list);
     lv_obj_remove_flag(logo_row, LV_OBJ_FLAG_SCROLLABLE);
@@ -760,7 +781,7 @@ static void theme_switch_changed(lv_event_t *e)
 
 static void build_display(void)
 {
-    add_back_row();
+    add_back_row(VIEW_MENU);
 
     /* Caption only — no event handler, not added to s_group, so it is not a
      * focus/click target, just an icon+label for the slider row below it. */
@@ -819,7 +840,7 @@ static void build_display(void)
 
 static void build_network(void)
 {
-    add_back_row();
+    add_back_row(VIEW_MENU);
 
     s_tz_btn = lv_list_add_button(s_list, NULL, "");
     lv_obj_add_event_cb(s_tz_btn, tz_clicked, LV_EVENT_CLICKED, NULL);
@@ -912,7 +933,7 @@ static void add_memory_gauge(void)
 
 static void build_storage(void)
 {
-    add_back_row();
+    add_back_row(VIEW_MENU);
 
     char line[64];
 
@@ -1087,7 +1108,7 @@ static void showcase_switch_changed(lv_event_t *e)
 
 static void build_apps(void)
 {
-    add_back_row();
+    add_back_row(VIEW_MENU);
 
     lv_obj_t *rescan_btn = lv_list_add_button(s_list, LV_SYMBOL_REFRESH, "Rescan SD card");
     lv_obj_add_event_cb(rescan_btn, rescan_clicked, LV_EVENT_CLICKED, NULL);
@@ -1190,6 +1211,7 @@ static void show_view(settings_view_t view)
     case VIEW_ABOUT:   build_about();   break;
     case VIEW_DISPLAY: build_display(); break;
     case VIEW_NETWORK: build_network(); break;
+    case VIEW_TZ:      build_tz();      break;
     case VIEW_STORAGE: build_storage(); break;
     case VIEW_APPS:    build_apps();    break;
     case VIEW_MENU:
