@@ -24,10 +24,17 @@ typedef enum {
 
 typedef void (*net_state_cb_t)(net_state_t state);
 
-/* AP name and the fixed address esp_netif hands out to it — for the setup
- * screen to display, so the two ends of the flow don't drift apart. */
+/* Fallback AP name and the fixed address esp_netif hands out to it — for the
+ * setup screen to display, so the two ends of the flow don't drift apart. */
 #define NET_SOFTAP_SSID "deskos-setup"
 #define NET_SOFTAP_URL  "http://192.168.4.1"
+
+/* The SSID net_softap_start() will actually use: /sd/device.json's "name"
+ * (ROADMAP #38.2/#45) if set, else NET_SOFTAP_SSID. The WiFi setup screen's
+ * own instructions need this instead of the bare constant, so they don't
+ * tell the user to look for a network name that isn't the one the AP is
+ * actually broadcasting. */
+void net_get_softap_ssid(char *out, size_t out_size);
 
 /* Starts the WiFi stack and connects if credentials are available. Returns OK
  * even with no credentials configured — that is a normal state that the shell

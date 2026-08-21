@@ -471,10 +471,22 @@ static void wifi_setup_close(bool user_cancelled)
     if (user_cancelled) {
         net_softap_stop();
     }
+    /* Deleting s_wifi_panel removes its focused child (Cancel) from
+     * s_group, and LVGL's own auto-refocus-on-removal runs at that exact
+     * moment — while s_list is still hidden, since the unhide below hasn't
+     * happened yet — so it walks the group, finds every candidate hidden,
+     * and gives up with no focus at all. Exactly the bug already found and
+     * fixed for the Apps delete-confirm panel (ROADMAP #18, see
+     * delete_panel_close()'s own comment); this panel just never got the
+     * same fix. Explicitly refocusing the row that opened it, now that
+     * s_list is visible again, is that same fix. */
     lv_obj_delete(s_wifi_panel);
     s_wifi_panel = NULL;
     s_wifi_status_label = NULL;
     lv_obj_remove_flag(s_list, LV_OBJ_FLAG_HIDDEN);
+    if (s_wifi_btn) {
+        lv_group_focus_obj(s_wifi_btn);
+    }
     wifi_label_update();
 }
 
@@ -536,9 +548,14 @@ static void wifi_clicked(lv_event_t *e)
     lv_obj_t *title = lv_label_create(s_wifi_panel);
     lv_label_set_text(title, "WiFi setup");
 
-    char instr[112];
+    /* Not the bare NET_SOFTAP_SSID constant — net_softap_start() actually
+     * broadcasts /sd/device.json's name when one is set (ROADMAP #38.2),
+     * and this instruction has to name whichever network is really there. */
+    char softap_ssid[64];
+    net_get_softap_ssid(softap_ssid, sizeof(softap_ssid));
+    char instr[144];
     snprintf(instr, sizeof(instr), "1. Connect a phone to WiFi \"%s\"\n2. Open %s in a browser",
-             NET_SOFTAP_SSID, NET_SOFTAP_URL);
+             softap_ssid, NET_SOFTAP_URL);
     lv_obj_t *instr_lbl = lv_label_create(s_wifi_panel);
     lv_obj_set_width(instr_lbl, LV_PCT(100));
     lv_label_set_long_mode(instr_lbl, LV_LABEL_LONG_WRAP);
@@ -858,6 +875,8 @@ static void build_about(void)
     lv_obj_set_style_bg_color(logo, lv_palette_main(LV_PALETTE_DEEP_PURPLE), LV_PART_MAIN);
     lv_obj_set_style_border_width(logo, 0, LV_PART_MAIN);
 
+    add_divider();
+
     const esp_app_desc_t *desc = esp_app_get_description();
     char line[96];
 
@@ -885,10 +904,15 @@ static void build_about(void)
         }
     }
     snprintf(line, sizeof(line), "Device: %s", name);
-    list_text(line);
+    /* The list's own item spacing (pad_gap) is 0 — normal rows are meant to
+     * sit flush, separated only by their own bottom border — so these two
+     * plain text rows had no breathing room between them at all. */
+    lv_obj_set_style_margin_bottom(list_text(line), 6, LV_PART_MAIN);
 
     snprintf(line, sizeof(line), "Firmware: %s", desc->version);
     list_text(line);
+
+    add_divider();
 
     s_ota_btn = lv_list_add_button(s_list, NULL, "Check for update");
     lv_obj_add_event_cb(s_ota_btn, ota_clicked, LV_EVENT_CLICKED, NULL);

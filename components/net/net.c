@@ -226,6 +226,35 @@ bool net_get_ip(char *out, size_t out_size)
     return true;
 }
 
+/* /sd/device.json ({"name":"..."}) — ROADMAP #38.2/#45, same file
+ * settings.c's About screen reads. Small local duplicate rather than a
+ * shared getter: this is the only other place that needs it, and it is a
+ * handful of lines. */
+void net_get_softap_ssid(char *out, size_t out_size)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "%s/device.json", BSP_SD_MOUNT_POINT);
+
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        char buf[128];
+        const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        buf[n] = '\0';
+        cJSON *root = cJSON_Parse(buf);
+        if (root) {
+            const char *v = cJSON_GetStringValue(cJSON_GetObjectItem(root, "name"));
+            if (v && *v) {
+                snprintf(out, out_size, "%s", v);
+                cJSON_Delete(root);
+                return;
+            }
+            cJSON_Delete(root);
+        }
+    }
+    snprintf(out, out_size, "%s", NET_SOFTAP_SSID);
+}
+
 /* --------------------------------------------------------- WiFi setup (AP) */
 
 /* There is no keyboard on this device, so entering an arbitrary SSID/password
@@ -397,8 +426,13 @@ esp_err_t net_softap_start(void)
 
     wifi_config_t ap_cfg;
     memset(&ap_cfg, 0, sizeof(ap_cfg));
-    snprintf((char *)ap_cfg.ap.ssid, sizeof(ap_cfg.ap.ssid), "%s", NET_SOFTAP_SSID);
-    ap_cfg.ap.ssid_len = (uint8_t)strlen(NET_SOFTAP_SSID);
+    /* Sized to match ap_cfg.ap.ssid exactly (32 bytes + NUL) — a device name
+     * longer than that (the web form allows up to 63) is truncated here,
+     * same as any WiFi SSID would be regardless of where it came from. */
+    char ssid[sizeof(ap_cfg.ap.ssid)];
+    net_get_softap_ssid(ssid, sizeof(ssid));
+    snprintf((char *)ap_cfg.ap.ssid, sizeof(ap_cfg.ap.ssid), "%s", ssid);
+    ap_cfg.ap.ssid_len = (uint8_t)strlen((char *)ap_cfg.ap.ssid);
     ap_cfg.ap.channel = 1;
     ap_cfg.ap.authmode = WIFI_AUTH_OPEN;   /* short-lived, user-triggered — see CLAUDE.md */
     ap_cfg.ap.max_connection = 2;
