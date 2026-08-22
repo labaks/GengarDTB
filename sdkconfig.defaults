@@ -114,12 +114,18 @@ CONFIG_LV_BUILD_EXAMPLES=n
 # --- TLS: flash matters more here than covering every CA/cipher on earth ---
 # The full bundle is ~69 KB of the ~1.66 MB OTA slot for CA certs alone; the
 # common-only bundle is Espressif's own documented "still ~99% coverage"
-# subset, roughly half the size. Not expected to change the existing
-# open-meteo TLS failure either way (see CLAUDE.md "Открытые вопросы" — that
-# one fails signature verification on a cert the bundle already matched, so
-# which CAs are present isn't the variable at play there).
+# subset, roughly half the size. Doesn't touch the open-meteo TLS failure
+# below — that one was a heap issue during verify, not the CA set (see
+# CLAUDE.md and CONFIG_MBEDTLS_DYNAMIC_BUFFER below).
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=n
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
+# The open-meteo TLS failure above (fixed, see CLAUDE.md) turned out to be
+# MBEDTLS_ERR_MPI_ALLOC_FAILED during the RSA-4096 verify against ISRG Root
+# X1, not a bad CA: the static 16 KB SSL_IN_CONTENT_LEN buffer was still held
+# at that point, and on this PSRAM-less board that's the difference between
+# fitting and not. Dynamic buffers free it right after the cert chain is
+# parsed, before the expensive bignum op runs.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 # Static ECDH ciphersuites (as opposed to ECDHE) are a relic no server we talk
 # to negotiates in practice — every real TLS deployment uses ECDHE for
 # forward secrecy. ECDHE_RSA/ECDHE_ECDSA (kept) already cover the real world.
