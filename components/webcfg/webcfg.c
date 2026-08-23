@@ -18,6 +18,7 @@ static const char *TAG = "webcfg";
 #define AGENT_PATH  BSP_SD_MOUNT_POINT "/agent.json"
 #define OTA_PATH    BSP_SD_MOUNT_POINT "/ota.json"
 #define FETCH_PATH  BSP_SD_MOUNT_POINT "/fetch.json"
+#define WEATHER_PATH BSP_SD_MOUNT_POINT "/weather.json"
 
 static httpd_handle_t s_httpd;
 
@@ -177,8 +178,10 @@ static void html_escape(char *dst, size_t dst_size, const char *src)
  * on a stack it does not own the budget of. */
 typedef struct {
     char device_name[64], wifi_ssid[33], ota_url[192], ota_manifest[192], fetch_manifest[192];
+    char weather_name[64], weather_lat[16], weather_lon[16];
     char safe_name[3 * 64], safe_ssid[3 * 33], safe_ota_url[3 * 192],
          safe_ota_manifest[3 * 192], safe_fetch_manifest[3 * 192];
+    char safe_weather_name[3 * 64], safe_weather_lat[3 * 16], safe_weather_lon[3 * 16];
 } form_values_t;
 
 static esp_err_t get_handler(httpd_req_t *req)
@@ -192,7 +195,7 @@ static esp_err_t get_handler(httpd_req_t *req)
      * there is no way to see the current value through this UI at all,
      * by design. */
     form_values_t *v = calloc(1, sizeof(form_values_t));
-    char *page = malloc(4096);
+    char *page = malloc(4608);   /* bumped from 4096 for the Weather fieldset */
     if (!v || !page) {
         free(v);
         free(page);
@@ -204,14 +207,20 @@ static esp_err_t get_handler(httpd_req_t *req)
     read_string_field(OTA_PATH, "url", v->ota_url, sizeof(v->ota_url));
     read_string_field(OTA_PATH, "manifest_url", v->ota_manifest, sizeof(v->ota_manifest));
     read_string_field(FETCH_PATH, "manifest_url", v->fetch_manifest, sizeof(v->fetch_manifest));
+    read_string_field(WEATHER_PATH, "name", v->weather_name, sizeof(v->weather_name));
+    read_string_field(WEATHER_PATH, "lat", v->weather_lat, sizeof(v->weather_lat));
+    read_string_field(WEATHER_PATH, "lon", v->weather_lon, sizeof(v->weather_lon));
 
     html_escape(v->safe_name, sizeof(v->safe_name), v->device_name);
     html_escape(v->safe_ssid, sizeof(v->safe_ssid), v->wifi_ssid);
     html_escape(v->safe_ota_url, sizeof(v->safe_ota_url), v->ota_url);
     html_escape(v->safe_ota_manifest, sizeof(v->safe_ota_manifest), v->ota_manifest);
     html_escape(v->safe_fetch_manifest, sizeof(v->safe_fetch_manifest), v->fetch_manifest);
+    html_escape(v->safe_weather_name, sizeof(v->safe_weather_name), v->weather_name);
+    html_escape(v->safe_weather_lat, sizeof(v->safe_weather_lat), v->weather_lat);
+    html_escape(v->safe_weather_lon, sizeof(v->safe_weather_lon), v->weather_lon);
 
-    snprintf(page, 4096,
+    snprintf(page, 4608,
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>deskos config</title>"
@@ -247,9 +256,17 @@ static esp_err_t get_handler(httpd_req_t *req)
         "<label>Manifest URL (icons, etc.)"
         "<input name=\"fetch_manifest_url\" maxlength=\"191\" value=\"%s\"></label>"
         "</fieldset>"
+        "<fieldset><legend>Weather</legend>"
+        "<label>City<input name=\"weather_name\" maxlength=\"63\" value=\"%s\"></label>"
+        "<label>Latitude<input name=\"weather_lat\" maxlength=\"15\" value=\"%s\"></label>"
+        "<label>Longitude<input name=\"weather_lon\" maxlength=\"15\" value=\"%s\"></label>"
+        "<p class=\"hint\">Look coordinates up on openstreetmap.org (right-click a "
+        "spot, \"Show address\") or latlong.net.</p>"
+        "</fieldset>"
         "<button type=\"submit\">Save</button>"
         "</form></body></html>",
-        v->safe_name, v->safe_ssid, v->safe_ota_url, v->safe_ota_manifest, v->safe_fetch_manifest);
+        v->safe_name, v->safe_ssid, v->safe_ota_url, v->safe_ota_manifest, v->safe_fetch_manifest,
+        v->safe_weather_name, v->safe_weather_lat, v->safe_weather_lon);
 
     httpd_resp_set_type(req, "text/html");
     const esp_err_t err = httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
@@ -340,6 +357,9 @@ static esp_err_t post_handler(httpd_req_t *req)
     FIELD("ota_url",            OTA_PATH,    "url");
     FIELD("ota_manifest_url",   OTA_PATH,    "manifest_url");
     FIELD("fetch_manifest_url", FETCH_PATH,  "manifest_url");
+    FIELD("weather_name",       WEATHER_PATH, "name");
+    FIELD("weather_lat",        WEATHER_PATH, "lat");
+    FIELD("weather_lon",        WEATHER_PATH, "lon");
 
     #undef FIELD
 

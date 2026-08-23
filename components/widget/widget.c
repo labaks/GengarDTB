@@ -81,6 +81,10 @@ static wsource_t         s_sources[WIDGET_MAX_SOURCES];
 static size_t            s_nsources;
 static cJSON            *s_combined;   /* persists across fetches; each source
                                          * updates its own slice of it */
+static cJSON            *s_config;     /* "data"/"config" fields only — kept
+                                         * apart so they can be reasserted over
+                                         * a disk cache that may predate them,
+                                         * see cache_load()'s own comment */
 static bool              s_showing_cache;   /* true until the first live fetch lands */
 static time_t            s_cache_ts;        /* epoch when the on-disk cache was written */
 
@@ -335,6 +339,11 @@ static void add_view(const cJSON *line, int line_no)
     s_nobjs++;
 }
 
+/* Defined later, alongside the other refresh-time merge logic; "data" and
+ * "config" lines below need them during parsing too, before that point. */
+static void merge_fields(cJSON **dest, cJSON *fetched);
+static void merge_source(const char *name, cJSON *fetched);
+
 static void parse_line(const char *line, int line_no)
 {
     cJSON *root = cJSON_Parse(line);
@@ -356,6 +365,18 @@ static void parse_line(const char *line, int line_no)
         return;
     }
 
+    /* Literal starting values, merged into the same document http/config
+     * sources write into — declared once, at parse time, not refreshed.
+     * Typically a widget's built-in defaults, declared before a "config"
+     * line so the SD file (if any) can override them field-by-field. */
+    const cJSON *data_obj = cJSON_GetObjectItem(root, "data");
+    if (cJSON_IsObject(data_obj)) {
+        merge_fields(&s_config, cJSON_Duplicate(data_obj, true));
+        merge_source(NULL, cJSON_Duplicate(data_obj, true));
+        cJSON_Delete(root);
+        return;
+    }
+
     const char *src = cJSON_GetStringValue(cJSON_GetObjectItem(root, "src"));
     if (src && strcmp(src, "http") == 0) {
         const char *url = cJSON_GetStringValue(cJSON_GetObjectItem(root, "url"));
@@ -367,10 +388,38 @@ static void parse_line(const char *line, int line_no)
         } else {
             wsource_t *s = &s_sources[s_nsources++];
             snprintf(s->name, sizeof(s->name), "%s", as ? as : "");
-            snprintf(s->url, sizeof(s->url), "%s", url);
+            /* {{...}} in the URL itself resolves against whatever "data"/
+             * "config" lines already ran above this one — lets the actual
+             * fetch target (city coordinates, a stock symbol, ...) come from
+             * user config instead of being hardcoded per widget. A URL with
+             * no {{...}} renders to itself, so existing widgets are unaffected. */
+            datasource_render(url, s_combined, s_dicts, s->url, sizeof(s->url));
             const int every = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(root, "every"));
             s->every_s = (every < REFRESH_MIN_S) ? REFRESH_MIN_S : (uint32_t)every;
             s->elapsed_s = s->every_s;   /* due immediately on the scheduler's first tick */
+        }
+    } else if (src && strcmp(src, "config") == 0) {
+        /* One-shot local read, not polled: a small JSON file (typically on
+         * SD, written by webcfg) merged in exactly like "data" above, just
+         * from disk instead of a literal. Missing or malformed file is not
+         * an error — whatever "data" already declared (or blank fields)
+         * stands, same graceful-degradation rule as every other source here. */
+        const char *cfg_path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "path"));
+        if (!cfg_path || !*cfg_path) {
+            report_error(line_no, "config source missing 'path'");
+        } else {
+            FILE *cf = fopen(cfg_path, "rb");
+            if (cf) {
+                char cfgbuf[256];
+                const size_t cn = fread(cfgbuf, 1, sizeof(cfgbuf) - 1, cf);
+                fclose(cf);
+                cfgbuf[cn] = '\0';
+                cJSON *cfg_root = cJSON_Parse(cfgbuf);
+                if (cfg_root) {
+                    merge_fields(&s_config, cJSON_Duplicate(cfg_root, true));
+                    merge_source(NULL, cfg_root);
+                }
+            }
         }
     } else if (src && strcmp(src, "clock") == 0) {
         /* Local source: no fetch, no network dependency. Ticks once a second
@@ -521,10 +570,13 @@ static bool cache_load(void)
     }
 
     s_cache_ts = (time_t)cJSON_GetNumberValue(cJSON_GetObjectItem(wrapper, "ts"));
-    if (s_combined) {
-        cJSON_Delete(s_combined);
-    }
-    s_combined = cJSON_Duplicate(data, true);
+    /* Spread onto whatever is already in s_combined rather than replacing it
+     * outright — same merge semantics merge_source() already uses for a live
+     * fetch, a cache is just an old fetch. This can still leave a stale
+     * "data"/"config" field on top of a fresher one (an old cache carries
+     * whatever name/lat/lon were current when it was written) — the caller
+     * reasserts s_config right after this call specifically to undo that. */
+    merge_source(NULL, cJSON_Duplicate(data, true));
     cJSON_Delete(wrapper);
     ESP_LOGI(TAG, "cache loaded: %s (ts %ld)", path, (long)s_cache_ts);
     return true;
@@ -553,31 +605,43 @@ static void format_cache_age(char *out, size_t out_size, time_t ts)
     }
 }
 
-/* Folds one source's freshly-fetched body into the persistent combined
- * document, taking ownership of `fetched` either way. Unnamed sources spread
- * their fields at the top level — the exact shape a single-source widget has
- * always rendered against — so existing ui.jsonl files need no changes.
- * Named sources nest under their own key instead. Either way, a redeclare
- * (this source's previous fetch) is replaced, same convention as "dict". */
-static void merge_source(const char *name, cJSON *fetched)
+/* Spreads fetched's top-level fields onto *dest (creating it if needed),
+ * overwriting same-named keys — a redeclare replaces, same convention "dict"
+ * uses. Takes ownership of `fetched` either way. Factored out of
+ * merge_source() so the "data"/"config" bookkeeping below can use the exact
+ * same overlay semantics against a second, separate document. */
+static void merge_fields(cJSON **dest, cJSON *fetched)
 {
-    if (!s_combined) {
-        s_combined = cJSON_CreateObject();
-    }
-    if (name && *name) {
-        cJSON_DeleteItemFromObject(s_combined, name);
-        cJSON_AddItemToObject(s_combined, name, fetched);
-        return;
+    if (!*dest) {
+        *dest = cJSON_CreateObject();
     }
     cJSON *child = fetched->child;
     while (child) {
         cJSON *next = child->next;
-        cJSON_DeleteItemFromObject(s_combined, child->string);
+        cJSON_DeleteItemFromObject(*dest, child->string);
         cJSON_DetachItemViaPointer(fetched, child);
-        cJSON_AddItemToObject(s_combined, child->string, child);
+        cJSON_AddItemToObject(*dest, child->string, child);
         child = next;
     }
     cJSON_Delete(fetched);   /* now an empty shell */
+}
+
+/* Folds one source's freshly-fetched body into the persistent combined
+ * document, taking ownership of `fetched` either way. Unnamed sources spread
+ * their fields at the top level — the exact shape a single-source widget has
+ * always rendered against — so existing ui.jsonl files need no changes.
+ * Named sources nest under their own key instead. */
+static void merge_source(const char *name, cJSON *fetched)
+{
+    if (name && *name) {
+        if (!s_combined) {
+            s_combined = cJSON_CreateObject();
+        }
+        cJSON_DeleteItemFromObject(s_combined, name);
+        cJSON_AddItemToObject(s_combined, name, fetched);
+        return;
+    }
+    merge_fields(&s_combined, fetched);
 }
 
 /* Decides what the corner says, in priority order: a stalled http source
@@ -891,6 +955,15 @@ esp_err_t widget_open(const app_info_t *app)
          * a cache the corner would otherwise sit blank for up to the ~10s
          * TLS connect timeout, indistinguishable from "nothing to report". */
         if (s_nsources > 0 && cache_load()) {
+            /* cache_load() just overlaid a disk cache that may well predate
+             * this session's "data"/"config" lines, or belong to a since-
+             * changed config (a different city, say) — reassert them on top
+             * so a stale cached "name" cannot outlive a live config change.
+             * The cache's own fields (current/daily, ...) are untouched:
+             * this only ever re-adds the specific keys "data"/"config" gave. */
+            if (s_config) {
+                merge_fields(&s_combined, cJSON_Duplicate(s_config, true));
+            }
             apply_data(s_combined);
             s_showing_cache = true;
             char age[32];
@@ -957,6 +1030,10 @@ void widget_close(void)
     if (s_combined) {
         cJSON_Delete(s_combined);
         s_combined = NULL;
+    }
+    if (s_config) {
+        cJSON_Delete(s_config);
+        s_config = NULL;
     }
     s_nsources = 0;
 
