@@ -78,6 +78,7 @@ static const app_info_t *s_app;
 static lv_obj_t         *s_screen;
 static lv_obj_t         *s_prev_screen;
 static lv_obj_t         *s_status_label;
+static lv_obj_t         *s_status_spinner;   /* ROADMAP #29, see set_status() */
 static wobj_t            s_objs[WIDGET_MAX_OBJS];
 static size_t            s_nobjs;
 
@@ -747,11 +748,27 @@ static void view_tap_cb(lv_event_t *e)
     }
 }
 
+/* ROADMAP #29: "loading" (the one status meaning "there is nothing on
+ * screen yet at all" — no cache, first fetch still in flight) used to be
+ * this same corner label showing that literal word in small grey text, easy
+ * to miss entirely. Every other status ("stale", "cached 5m ago", "waiting
+ * for network", "refreshing...") stays plain text — those all sit next to
+ * data already on screen, where a corner note is enough; "loading" is the
+ * one case with nothing else to look at. */
 static void set_status(const char *text)
 {
-    if (s_status_label) {
-        lv_label_set_text(s_status_label, text);
+    if (!s_status_label) {
+        return;
     }
+    const bool loading = text && strcmp(text, "loading") == 0;
+    if (s_status_spinner) {
+        if (loading) {
+            lv_obj_remove_flag(s_status_spinner, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_status_spinner, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    lv_label_set_text(s_status_label, loading ? "" : text);
 }
 
 /* -------------------------------------------------------------- disk cache */
@@ -1164,6 +1181,16 @@ esp_err_t widget_open(const app_info_t *app)
     lv_obj_align(s_status_label, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
     lv_label_set_text(s_status_label, "");
 
+    /* ROADMAP #29. Same corner as the label above, shown instead of it (not
+     * alongside — set_status() blanks the label text whenever this is
+     * visible) while there is nothing on screen yet at all. Small and
+     * unobtrusive on purpose: a widget with cached data to show never
+     * displays this at all, see set_status(). */
+    s_status_spinner = lv_spinner_create(s_screen);
+    lv_obj_set_size(s_status_spinner, 14, 14);
+    lv_obj_align(s_status_spinner, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
+    lv_obj_add_flag(s_status_spinner, LV_OBJ_FLAG_HIDDEN);
+
     /* Split on '\n' only (not strtok_r's usual "\r\n" delimiter SET) so that a
      * genuinely blank line still advances the count — strtok_r collapses runs
      * of delimiter characters, which would silently throw off every line
@@ -1353,6 +1380,7 @@ void widget_close(void)
         s_screen = NULL;
     }
     s_status_label = NULL;
+    s_status_spinner = NULL;
     s_app = NULL;
 }
 
