@@ -18,6 +18,7 @@
 #include "ota.h"
 #include "shell.h"
 #include "webcfg.h"
+#include "widget.h"
 
 static const char *TAG = "settings";
 
@@ -997,6 +998,18 @@ static void theme_switch_changed(lv_event_t *e)
     lv_obj_set_style_bg_color(s_screen, shell_theme_bg(), LV_PART_MAIN);
 }
 
+/* ROADMAP #39: originally a tap target on the clock face itself; moved here
+ * after the first hardware check found the resistive touch panel's known
+ * imprecision (CLAUDE.md, touch calibration) made that small a target
+ * genuinely hard to hit. widget.c owns the value and NVS key — this just
+ * mirrors it into a switch, same split as every other setting on this
+ * screen that a running widget might also care about. */
+static void clock_format_switch_changed(lv_event_t *e)
+{
+    const bool h24 = !lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    widget_set_clock_h24(h24);
+}
+
 static void build_display(void)
 {
     add_back_row(VIEW_MENU);
@@ -1054,6 +1067,20 @@ static void build_display(void)
     }
     lv_obj_add_event_cb(theme_sw, theme_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
     lv_group_add_obj(s_group, theme_sw);
+
+    /* Same label+switch shape as the theme row just above. */
+    lv_obj_t *clockfmt_row = lv_list_add_button(s_list, NULL, NULL);
+    lv_obj_remove_flag(clockfmt_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *clockfmt_label = lv_label_create(clockfmt_row);
+    lv_obj_set_flex_grow(clockfmt_label, 1);
+    lv_label_set_text(clockfmt_label, "12-hour clock");
+    lv_obj_t *clockfmt_sw = lv_switch_create(clockfmt_row);
+    lv_obj_set_size(clockfmt_sw, 28, 14);
+    if (!widget_clock_h24()) {
+        lv_obj_add_state(clockfmt_sw, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(clockfmt_sw, clock_format_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_group_add_obj(s_group, clockfmt_sw);
 }
 
 static void build_network(void)

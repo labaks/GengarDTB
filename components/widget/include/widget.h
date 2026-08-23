@@ -37,6 +37,14 @@ const app_info_t *widget_current(void);
  * push and cannot be hurried, and clock has nothing to fetch at all. */
 void widget_refresh_now(void);
 
+/* ROADMAP #39. The clock source's 12h/24h display preference — one setting
+ * shared by any widget using {"src":"clock"}, same as there is only one
+ * timezone. Settings → Display owns the switch UI; this file owns the value
+ * (in-memory, backing a possibly-open clock widget) and its NVS persistence.
+ * Safe to call whether or not a clock widget has ever opened this boot. */
+bool widget_clock_h24(void);
+void widget_set_clock_h24(bool h24);
+
 #ifdef __cplusplus
 }
 #endif

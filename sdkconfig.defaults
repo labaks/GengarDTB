@@ -49,6 +49,11 @@ CONFIG_LV_LOG_LEVEL_WARN=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
+# ROADMAP #39: clock redesign wants digits far bigger than 28pt. Largest
+# bundled Montserrat size LVGL ships; still combined with a style "scale"
+# transform in ui.jsonl to reach "fills the screen" (see widget.c's
+# font_for()/add_view()'s "scale" field).
+CONFIG_LV_FONT_MONTSERRAT_48=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
 # Widgets we actually use in the shell. Keep the rest off to save flash.
 CONFIG_LV_USE_LABEL=y

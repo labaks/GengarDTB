@@ -1,6 +1,11 @@
 {"src":"clock"}
-{"obj":"rect","x":0,"y":18,"w":320,"h":44,"color":"0x1E2A38"}
-{"obj":"label","x":12,"y":30,"font":20,"color":"0xFFFFFF","text":"Clock"}
-{"obj":"label","x":12,"y":94,"font":28,"color":"0xFFFFFF","text":"{{time}}"}
-{"obj":"label","x":12,"y":144,"font":20,"color":"0xC0C8D0","text":"{{weekday}}"}
-{"obj":"label","x":12,"y":174,"font":14,"color":"0x8899A6","text":"{{date}}"}
+{"obj":"rect","x":0,"y":18,"w":320,"h":222,"color":"0x101418","tap":"next_page"}
+{"obj":"label","x":0,"y":26,"w":320,"align":"center","font":20,"color":"0x4FC3F7","text":"{{weekday}}","page":0}
+{"obj":"label","x":0,"y":64,"w":320,"align":"center","font":48,"color":"0xFFFFFF","scale":200,"text":"{{time}}","if":"h24","page":0}
+{"obj":"label","x":0,"y":64,"w":320,"align":"center","font":48,"color":"0xFFFFFF","scale":200,"text":"{{time12}}","if":"h12","page":0}
+{"obj":"label","x":0,"y":190,"w":320,"align":"center","font":20,"color":"0x6B7A8A","text":"{{date}}","page":0}
+{"obj":"label","x":0,"y":26,"w":320,"align":"center","font":20,"color":"0xFFB300","text":"{{weekday}}","page":1}
+{"obj":"label","x":0,"y":64,"w":320,"align":"center","font":48,"color":"0xFFB300","scale":200,"text":"{{time}}","if":"h24","page":1}
+{"obj":"label","x":0,"y":64,"w":320,"align":"center","font":48,"color":"0xFFB300","scale":200,"text":"{{time12}}","if":"h12","page":1}
+{"obj":"label","x":0,"y":190,"w":320,"align":"center","font":20,"color":"0xC0824A","text":"{{date}}","page":1}
+{"obj":"label","x":0,"y":214,"w":320,"align":"center","font":16,"color":"0x8899A6","text":"{{ampm}}","if":"h12"}

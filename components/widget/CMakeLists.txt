@@ -14,4 +14,5 @@ idf_component_register(
         esp-tls
         lvgl__lvgl
         espressif__esp_lvgl_port
+        nvs_flash
 )

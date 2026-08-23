@@ -16,8 +16,13 @@
 #include "host.h"
 #include "lvgl.h"
 #include "net.h"
+#include "nvs.h"
 
 static const char *TAG = "widget";
+
+/* Same "define it locally, don't share a header" convention as every other
+ * file that touches NVS (settings.c, net.c, bsp_display.c, bsp_touch.c). */
+#define NVS_NAMESPACE "deskos"
 
 #define WIDGET_MAX_OBJS   56      /* bumped for #40's per-cell weather grid
                                      * (title+icon+value per hour/day, 7 of
@@ -84,6 +89,102 @@ static size_t            s_nobjs;
  * then a permanent no-op, not a crash or an out-of-range page. */
 static int               s_page;
 static int               s_max_page;
+
+/* Persisted across reopen/reboot (NVS key "pg_<app id>") whenever a widget
+ * declares more than one page — ROADMAP #39's style presets are pages like
+ * any other (see clock.ui.jsonl), and a preset choice that reverted every
+ * time the widget was reopened would not read as a real setting. Weather's
+ * hourly/daily toggle (#40) rides along for free, which is harmless: nothing
+ * about "page" was ever meant to be session-only, it just had no other
+ * consumer needing persistence until now. */
+static void page_nvs_key(const app_info_t *app, char *out, size_t out_size)
+{
+    /* NVS keys are capped at 15 chars total; "pg_" (3) + 11 of the id stays
+     * safely under that for any id this project's app ids ever use. */
+    snprintf(out, out_size, "pg_%.11s", app->id);
+}
+
+static int page_nvs_load(const app_info_t *app)
+{
+    char key[16];
+    page_nvs_key(app, key, sizeof(key));
+    nvs_handle_t h;
+    int32_t v = 0;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_i32(h, key, &v);
+        nvs_close(h);
+    }
+    return (int)v;
+}
+
+static void page_nvs_save(const app_info_t *app, int page)
+{
+    char key[16];
+    page_nvs_key(app, key, sizeof(key));
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_i32(h, key, page);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+/* The clock source's own display preference — not per-widget like the page
+ * above: any ui.jsonl that declares {"src":"clock"} shares one "how the user
+ * likes to read time" setting, the same way the device only has one
+ * timezone. Loaded lazily on first use (widget_open(), guarded by
+ * s_has_clock, or the first Settings → Display call to widget_clock_h24()
+ * below — whichever happens first this boot) rather than at boot: nothing
+ * needs it before a clock source or that screen actually exists.
+ *
+ * ROADMAP #39's first attempt put the toggle on the clock face itself (a
+ * tappable corner badge) — worked logically, but the resistive touch panel's
+ * known imprecision (see CLAUDE.md on touch calibration) made a small target
+ * genuinely hard to hit, confirmed on hardware. Moved to a real Settings row
+ * instead (settings.c's Display view, a plain switch — see build_display()),
+ * which is why the getter/setter below are public: settings.c owns the UI,
+ * this file still owns the value and its persistence, since a pinned clock
+ * widget can sit open on Home while the setting changes underneath it and
+ * has to pick up the new value on its very next tick, not on next reopen. */
+#define NVS_KEY_CLOCK_H24 "clock_h24"
+static bool               s_clock_h24 = true;
+static bool               s_clock_h24_loaded;
+
+static void clock_format_load(void)
+{
+    if (s_clock_h24_loaded) {
+        return;
+    }
+    s_clock_h24_loaded = true;
+    nvs_handle_t h;
+    uint8_t v = 1;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, NVS_KEY_CLOCK_H24, &v);
+        nvs_close(h);
+    }
+    s_clock_h24 = v != 0;
+}
+
+bool widget_clock_h24(void)
+{
+    clock_format_load();
+    return s_clock_h24;
+}
+
+void widget_set_clock_h24(bool h24)
+{
+    s_clock_h24_loaded = true;
+    if (h24 == s_clock_h24) {
+        return;
+    }
+    s_clock_h24 = h24;
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, NVS_KEY_CLOCK_H24, s_clock_h24 ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
 
 /* Named lookup tables for the "dict" filter, e.g. {"dict":"weather_code",
  * "map":{"0":"Clear",...}}. One object: {name: map, name: map, ...}. */
@@ -166,6 +267,7 @@ static void report_error(int line_no, const char *fmt, ...)
 static const lv_font_t *font_for(int size)
 {
     switch (size) {
+    case 48: return &lv_font_montserrat_48;
     case 28: return &lv_font_montserrat_28;
     case 20: return &lv_font_montserrat_20;
     default: return &lv_font_montserrat_14;
@@ -244,6 +346,7 @@ static void add_view(const cJSON *line, int line_no)
 
     const int x = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(line, "x"));
     const int y = (int)cJSON_GetNumberValue(cJSON_GetObjectItem(line, "y"));
+    int label_w = 0;   /* declared "w" on a label, used below to center "scale"'s pivot */
 
     lv_obj_t *obj = NULL;
 
@@ -254,7 +357,8 @@ static void add_view(const cJSON *line, int line_no)
 
         const cJSON *w = cJSON_GetObjectItem(line, "w");
         if (cJSON_IsNumber(w)) {
-            lv_obj_set_width(obj, (int)cJSON_GetNumberValue(w));
+            label_w = (int)cJSON_GetNumberValue(w);
+            lv_obj_set_width(obj, label_w);
             lv_label_set_long_mode(obj, LV_LABEL_LONG_WRAP);
         }
 
@@ -386,6 +490,36 @@ static void add_view(const cJSON *line, int line_no)
 
     lv_obj_set_pos(obj, x, y);
 
+    /* ROADMAP #39: blows up a label past whatever the largest bundled
+     * Montserrat size (48) alone gives — needed for "digits filling the
+     * screen" without embedding a custom bitmap font (CLAUDE.md, "не
+     * вкомпилировать шрифты"). Percent, 100 = unchanged; e.g. 200 doubles
+     * both axes. Pivot is the view's own (x,y) corner, not its center — the
+     * enlarged render grows right/down from the position already given in
+     * ui.jsonl, so placement still has to account for the bigger box by
+     * hand — except horizontally when "w" is also given: the pivot then
+     * defaults to the middle of that declared width (matching "align":
+     * "center", which almost always accompanies it), so the enlarged text
+     * grows symmetrically left/right from mid-box instead of only
+     * rightward — that pairing is what actually centers a scaled label on
+     * screen, since the transform itself never reflows layout. Vertically
+     * the pivot stays the top edge (y unaffected by "w"); nothing here has
+     * asked for vertical centering yet.
+     * Only exercised so far on WVIEW_LABEL (clock.ui.jsonl); left generic
+     * rather than gated by kind since the risk this is hedging against —
+     * lv_image_set_scale() breaking rendering outright (see #40, image_apply)
+     * — is a different LVGL code path (that one mutates the image widget's
+     * own draw descriptor; this is a generic style transform any widget
+     * honours), not the same bug wearing a different field name. */
+    const cJSON *scale_node = cJSON_GetObjectItem(line, "scale");
+    if (cJSON_IsNumber(scale_node)) {
+        const int32_t scale256 = (int32_t)(cJSON_GetNumberValue(scale_node) * 256.0 / 100.0);
+        lv_obj_set_style_transform_pivot_x(obj, label_w > 0 ? label_w / 2 : 0, LV_PART_MAIN);
+        lv_obj_set_style_transform_pivot_y(obj, 0, LV_PART_MAIN);
+        lv_obj_set_style_transform_scale_x(obj, scale256, LV_PART_MAIN);
+        lv_obj_set_style_transform_scale_y(obj, scale256, LV_PART_MAIN);
+    }
+
     /* LVGL objects default to clickable, arc's own creation branch above
      * already had to opt back out of that for the same reason: whichever
      * object is on top at a touch point eats the click outright, it is not
@@ -421,6 +555,21 @@ static void add_view(const cJSON *line, int line_no)
         s_objs[s_nobjs].tap = strdup(tap);
         lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(obj, view_tap_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)s_nobjs);
+
+        /* A plain lv_obj gets no default-theme press feedback the way a real
+         * lv_button does — found on hardware while chasing #39's format
+         * toggle: with zero visual response to a touch-down, there was no
+         * way to tell "I missed the target" apart from "I hit it and the
+         * action is a no-op", which is exactly the ambiguity that made a
+         * genuine bug (or a miss) unfalsifiable from the user's side. Any
+         * touch on a tappable rect now visibly lightens it immediately,
+         * before dispatch_tap_action ever runs — confirms the tap landed
+         * regardless of what the action itself does or doesn't change. */
+        if (wkind == WVIEW_RECT) {
+            const lv_color_t base = lv_obj_get_style_bg_color(obj, LV_PART_MAIN);
+            lv_obj_set_style_bg_color(obj, lv_color_lighten(base, 60),
+                                       (lv_style_selector_t)LV_PART_MAIN | LV_STATE_PRESSED);
+        }
     }
 
     s_objs[s_nobjs].obj = obj;
@@ -583,6 +732,9 @@ static void dispatch_tap_action(const char *action)
         if (s_max_page > 0) {
             s_page = (s_page + 1) % (s_max_page + 1);
             apply_data(s_combined);
+            if (s_app) {
+                page_nvs_save(s_app, s_page);
+            }
         }
     }
 }
@@ -905,6 +1057,14 @@ static void clock_task(void *arg)
             char buf[16];
             strftime(buf, sizeof(buf), "%H:%M", &tm_local);
             cJSON_AddStringToObject(root, "time", buf);
+            strftime(buf, sizeof(buf), "%I:%M", &tm_local);
+            /* newlib's strftime has no "%-I" (no-leading-zero) flag, unlike
+             * glibc — trimmed by hand instead for a plain single-digit hour. */
+            cJSON_AddStringToObject(root, "time12", buf[0] == '0' ? buf + 1 : buf);
+            strftime(buf, sizeof(buf), "%p", &tm_local);
+            cJSON_AddStringToObject(root, "ampm", buf);
+            cJSON_AddBoolToObject(root, "h24", s_clock_h24);
+            cJSON_AddBoolToObject(root, "h12", !s_clock_h24);
             strftime(buf, sizeof(buf), "%d %b %Y", &tm_local);
             cJSON_AddStringToObject(root, "date", buf);
             strftime(buf, sizeof(buf), "%a", &tm_local);
@@ -980,7 +1140,12 @@ esp_err_t widget_open(const app_info_t *app)
     s_cache_ts = 0;
     s_nhosttopics = 0;
     s_has_clock = false;
-    s_page = 0;
+    /* Restored before parsing, not after: add_view() below decides each
+     * page-tagged view's initial hidden state from s_page at creation time,
+     * so the persisted page has to already be in place or the first frame
+     * would flash page 0 regardless. A stale value from a since-shrunk
+     * ui.jsonl is caught below, once s_max_page is actually known. */
+    s_page = page_nvs_load(app);
     s_max_page = 0;
     memset(s_objs, 0, sizeof(s_objs));
     s_err_buf[0] = '\0';
@@ -1029,6 +1194,25 @@ esp_err_t widget_open(const app_info_t *app)
     }
     free(buf);
 
+    /* A persisted page from a ui.jsonl that has since shrunk (or never had
+     * pages at all) would otherwise leave every page-tagged view hidden —
+     * indistinguishable from a blank widget. Views were already built above
+     * against the unclamped s_page; only s_page itself needs fixing up here,
+     * apply_data() re-derives visibility from it on the very first refresh
+     * that follows (clock/http/host all call it before anything is shown). */
+    if (s_page < 0 || s_page > s_max_page) {
+        s_page = 0;
+    }
+    for (size_t i = 0; i < s_nobjs; i++) {
+        if (s_objs[i].obj && s_objs[i].page >= 0) {
+            if (s_objs[i].page == s_page) {
+                lv_obj_remove_flag(s_objs[i].obj, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(s_objs[i].obj, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    }
+
     if (s_err_count > 0) {
         if (s_err_count > WIDGET_ERR_SHOWN) {
             char more[24];
@@ -1063,6 +1247,7 @@ esp_err_t widget_open(const app_info_t *app)
      * Multiple http sources (ROADMAP #10) and http + host together are fine
      * — both just feed merge_source() into the same s_combined. */
     if (s_has_clock) {
+        clock_format_load();
         s_stop = false;
         if (xTaskCreatePinnedToCore(clock_task, "wdg_clock", 4096, NULL, 3, &s_task, 1)
                 != pdPASS) {
