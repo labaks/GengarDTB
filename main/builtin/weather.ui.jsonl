@@ -1,13 +1,13 @@
 {"data":{"name":"Plovdiv","lat":"42.14","lon":"24.75"}}
 {"src":"config","path":"/sd/weather.json"}
-{"src":"http","url":"https://api.open-meteo.com/v1/forecast?latitude={{lat}}&longitude={{lon}}&current=temperature_2m,apparent_temperature,weather_code,relative_humidity_2m&hourly=temperature_2m,weather_code,precipitation_probability&forecast_hours=6&daily=temperature_2m_max,temperature_2m_min,weather_code&forecast_days=6&timezone=auto","every":900}
+{"src":"http","url":"https://api.open-meteo.com/v1/forecast?latitude={{lat}}&longitude={{lon}}&current=temperature_2m,apparent_temperature,weather_code,precipitation_probability&hourly=temperature_2m,weather_code,precipitation_probability&forecast_hours=6&daily=temperature_2m_max,weather_code,precipitation_probability_max&forecast_days=6&timezone=auto","every":900}
 {"dict":"weather_code","map":{"0":"Clear sky","1":"Mainly clear","2":"Partly cloudy","3":"Cloudy","45":"Fog","48":"Rime fog","51":"Light drizzle","53":"Drizzle","55":"Dense drizzle","56":"Freezing drizzle","57":"Freezing drizzle","61":"Light rain","63":"Rain","65":"Heavy rain","66":"Freezing rain","67":"Freezing rain","71":"Light snow","73":"Snow","75":"Heavy snow","77":"Snow grains","80":"Rain showers","81":"Rain showers","82":"Violent showers","85":"Snow showers","86":"Snow showers","95":"Thunderstorm","96":"Thunderstorm, hail","99":"Thunderstorm, hail"}}
 {"dict":"weather_icon","map":{"0":"/sd/icons/weather/clear_day.bin","1":"/sd/icons/weather/mostly_clear_day.bin","2":"/sd/icons/weather/partly_cloudy_day.bin","3":"/sd/icons/weather/cloudy.bin","45":"/sd/icons/weather/haze_fog_dust_smoke.bin","48":"/sd/icons/weather/haze_fog_dust_smoke.bin","51":"/sd/icons/weather/drizzle.bin","53":"/sd/icons/weather/drizzle.bin","55":"/sd/icons/weather/drizzle.bin","56":"/sd/icons/weather/icy.bin","57":"/sd/icons/weather/icy.bin","61":"/sd/icons/weather/rain_with_cloudy.bin","63":"/sd/icons/weather/rain_with_cloudy.bin","65":"/sd/icons/weather/heavy_rain.bin","66":"/sd/icons/weather/icy.bin","67":"/sd/icons/weather/icy.bin","71":"/sd/icons/weather/snow_with_cloudy.bin","73":"/sd/icons/weather/snow_with_cloudy.bin","75":"/sd/icons/weather/heavy_snow.bin","77":"/sd/icons/weather/flurries.bin","80":"/sd/icons/weather/showers_rain.bin","81":"/sd/icons/weather/showers_rain.bin","82":"/sd/icons/weather/heavy_rain.bin","85":"/sd/icons/weather/scattered_snow_showers_day.bin","86":"/sd/icons/weather/scattered_snow_showers_day.bin","95":"/sd/icons/weather/isolated_thunderstorms.bin","96":"/sd/icons/weather/thunderstorms.bin","99":"/sd/icons/weather/thunderstorms.bin"}}
 {"obj":"image","x":12,"y":28,"src":"{{current.weather_code | dict:weather_icon}}"}
 {"obj":"label","x":64,"y":28,"font":28,"color":"0xFFFFFF","text":"{{current.temperature_2m | round:0}}°"}
 {"obj":"label","x":64,"y":62,"font":14,"color":"0xC0C8D0","text":"feels {{current.apparent_temperature | round:0}}°"}
-{"obj":"label","x":180,"y":28,"font":28,"color":"0xFFFFFF","text":"{{current.relative_humidity_2m}}%"}
-{"obj":"label","x":180,"y":62,"font":14,"color":"0xC0C8D0","text":"humidity"}
+{"obj":"label","x":180,"y":28,"font":28,"color":"0xFFFFFF","text":"{{current.precipitation_probability}}%"}
+{"obj":"label","x":180,"y":62,"font":14,"color":"0xC0C8D0","text":"rain"}
 {"obj":"label","x":12,"y":86,"font":14,"color":"0x8899A6","text":"{{current.weather_code | dict:weather_code}}"}
 {"obj":"rect","x":0,"y":120,"w":320,"h":96,"color":"0x101418","tap":"next_page"}
 {"obj":"line","x":67,"y":122,"x1":0,"y1":0,"x2":0,"y2":92,"color":"0x2A3642","width":1}
@@ -31,16 +31,16 @@
 {"obj":"label","x":255,"y":188,"w":58,"align":"center","font":14,"color":"0xC0C8D0","text":"{{hourly.temperature_2m.5 | round:0}}°/{{hourly.precipitation_probability.5}}%","page":0}
 {"obj":"label","x":7,"y":122,"w":58,"align":"center","font":14,"color":"0xE8E8E8","text":"{{daily.time.1 | date:%a}}","page":1}
 {"obj":"image","x":16,"y":140,"src":"{{daily.weather_code.1 | dict:weather_icon}}","page":1}
-{"obj":"label","x":7,"y":188,"w":58,"align":"center","font":14,"color":"0xC0C8D0","text":"{{daily.temperature_2m_min.1 | round:0}}°/{{daily.temperature_2m_max.1 | round:0}}°","page":1}
+{"obj":"label","x":7,"y":188,"w":58,"align":"center","font":14,"color":"0xC0C8D0","text":"{{daily.temperature_2m_max.1 | round:0}}° {{daily.precipitation_probability_max.1}}%","page":1}
 {"obj":"label","x":69,"y":122,"w":58,"align":"center","font":14,"color":"0xE8E8E8","text":"{{daily.time.2 | date:%a}}","page":1}
 {"obj":"image","x":78,"y":140,"src":"{{daily.weather_code.2 | dict:weather_icon}}","page":1}
-{"obj":"label","x":69,"y":188,"w":58,"align":"center","font":14,"color":"0xC0C8D0","text":"{{daily.temperature_2m_min.2 | round:0}}°/{{daily.temperature_2m_max.2 | round:0}}°","page":1}
+{"obj":"label","x":69,"y":188,"w":58,"align":"center","font":14,"color":"0xC0C8D0","text":"{{daily.temperature_2m_max.2 | round:0}}° {{daily.precipitation_probability_max.2}}%","page":1}
 {"obj":"label","x":131,"y":122,"w":58,"align":"center","font":14,"color":"0xE8E8E8","text":"{{daily.time.3 | date:%a}}","page":1}
 {"obj":"image","x":140,"y":140,"src":"{{daily.weather_code.3 | dict:weather_icon}}","page":1}
-{"obj":"label","x":131,"y":188,"w":58,"align":"center","font":14,"color":"0xC0C8D0","text":"{{daily.temperature_2m_min.3 | round:0}}°/{{daily.temperature_2m_max.3 | round:0}}°","page":1}
+{"obj":"label","x":131,"y":188,"w":58,"align":"center","font":14,"color":"0xC0C8D0","text":"{{daily.temperature_2m_max.3 | round:0}}° {{daily.precipitation_probability_max.3}}%","page":1}
 {"obj":"label","x":193,"y":122,"w":58,"align":"center","font":14,"color":"0xE8E8E8","text":"{{daily.time.4 | date:%a}}","page":1}
 {"obj":"image","x":202,"y":140,"src":"{{daily.weather_code.4 | dict:weather_icon}}","page":1}
-{"obj":"label","x":193,"y":188,"w":58,"align":"center","font":14,"color":"0xC0C8D0","text":"{{daily.temperature_2m_min.4 | round:0}}°/{{daily.temperature_2m_max.4 | round:0}}°","page":1}
+{"obj":"label","x":193,"y":188,"w":58,"align":"center","font":14,"color":"0xC0C8D0","text":"{{daily.temperature_2m_max.4 | round:0}}° {{daily.precipitation_probability_max.4}}%","page":1}
 {"obj":"label","x":255,"y":122,"w":58,"align":"center","font":14,"color":"0xE8E8E8","text":"{{daily.time.5 | date:%a}}","page":1}
 {"obj":"image","x":264,"y":140,"src":"{{daily.weather_code.5 | dict:weather_icon}}","page":1}
-{"obj":"label","x":255,"y":188,"w":58,"align":"center","font":14,"color":"0xC0C8D0","text":"{{daily.temperature_2m_min.5 | round:0}}°/{{daily.temperature_2m_max.5 | round:0}}°","page":1}
+{"obj":"label","x":255,"y":188,"w":58,"align":"center","font":14,"color":"0xC0C8D0","text":"{{daily.temperature_2m_max.5 | round:0}}° {{daily.precipitation_probability_max.5}}%","page":1}
