@@ -36,6 +36,11 @@ static const char *TAG = "widget";
 
 #define WIDGET_CACHE_NAME ".cache.json"
 #define WIDGET_MAX_CACHE  4096      /* combined source data, not the raw ui.jsonl */
+#define WIDGET_CACHE_MAX_AGE_S (3600)  /* a disk cache older than this is not
+                                         * "yesterday's data", it's just wrong
+                                         * — better to show "loading" and wait
+                                         * for a real fetch than a stale value
+                                         * dressed up as current */
 
 typedef enum {
     WVIEW_LABEL,
@@ -679,6 +684,11 @@ static bool cache_load(void)
     }
 
     s_cache_ts = (time_t)cJSON_GetNumberValue(cJSON_GetObjectItem(wrapper, "ts"));
+    if (net_time_valid() && s_cache_ts > 0 && time(NULL) - s_cache_ts > WIDGET_CACHE_MAX_AGE_S) {
+        ESP_LOGI(TAG, "cache too old (%lds), ignoring: %s", (long)(time(NULL) - s_cache_ts), path);
+        cJSON_Delete(wrapper);
+        return false;
+    }
     /* Spread onto whatever is already in s_combined rather than replacing it
      * outright — same merge semantics merge_source() already uses for a live
      * fetch, a cache is just an old fetch. This can still leave a stale
