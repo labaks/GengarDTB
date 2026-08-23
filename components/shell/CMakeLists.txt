@@ -10,6 +10,7 @@ idf_component_register(
         input
         registry
         widget
+        catalog
         net
         host
         ota

@@ -13,6 +13,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include "cJSON.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +45,25 @@ typedef void (*fetch_progress_cb_t)(fetch_state_t state, int percent, const char
 void fetch_run(fetch_progress_cb_t cb);
 
 bool fetch_is_running(void);
+
+/* Blocking GET of a small JSON document (10s timeout, 8 KB cap, no auto
+ * redirect) — the exact primitive /sd/fetch.json's own "manifest_url"
+ * indirection already used internally to fetch a remote {"items":[...]}
+ * document. Exposed for catalog.c (ROADMAP #20), which needs the same "get
+ * me a JSON manifest from a URL" step for both the app catalog itself and
+ * each app's own file list. NULL on any failure (bad URL, timeout, non-200,
+ * malformed JSON, over the size cap). Caller owns the result. Must not run
+ * on the LVGL task — same rule as datasource_fetch_json(). */
+cJSON *fetch_json_url(const char *url);
+
+/* Downloads every {"url":...,"dest":...} pair in items to its dest path,
+ * one at a time, creating missing parent directories as needed — the same
+ * per-item behavior and cb reporting fetch_run() itself uses once it has
+ * resolved /sd/fetch.json down to an items array. Runs synchronously on the
+ * calling task; fetch_run() calls this from its own background task, and a
+ * caller with its own task (catalog.c's install path) can call it directly.
+ * items is not modified or freed. Returns true iff every item succeeded. */
+bool fetch_items(const cJSON *items, fetch_progress_cb_t cb);
 
 #ifdef __cplusplus
 }

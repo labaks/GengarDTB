@@ -149,8 +149,10 @@ static esp_err_t body_event(esp_http_client_event_t *evt)
  * the thing that actually changes every time a new batch of files needs
  * pushing — lives on the PC, not the card. /sd/fetch.json becomes a
  * one-time bootstrap pointer, same spirit as /sd/agent.json holding just a
- * token rather than the whole protocol. */
-static cJSON *fetch_remote_manifest(const char *url)
+ * token rather than the whole protocol. Public (fetch_json_url() in
+ * fetch.h) since catalog.c (ROADMAP #20) needs the exact same primitive for
+ * both the catalog list itself and each app's own file list. */
+cJSON *fetch_json_url(const char *url)
 {
     body_t body = { .buf = malloc(FETCH_MANIFEST_MAX_BODY + 1), .len = 0 };
     if (!body.buf) {
@@ -199,11 +201,42 @@ static cJSON *load_manifest(void)
     }
     const char *manifest_url = cJSON_GetStringValue(cJSON_GetObjectItem(root, "manifest_url"));
     if (manifest_url && *manifest_url) {
-        cJSON *remote = fetch_remote_manifest(manifest_url);
+        cJSON *remote = fetch_json_url(manifest_url);
         cJSON_Delete(root);
         return remote;
     }
     return root;
+}
+
+/* The actual per-item download loop, shared between fetch_run() (fed from
+ * /sd/fetch.json, possibly via manifest_url) and catalog.c's install path
+ * (fed from a catalog entry's own manifest_url, fetched with
+ * fetch_json_url() above) — same items shape, same reporting either way. */
+bool fetch_items(const cJSON *items, fetch_progress_cb_t cb)
+{
+    const int total = cJSON_GetArraySize(items);
+    int done_count = 0;
+    int failed = 0;
+    const cJSON *item;
+    cJSON_ArrayForEach(item, items) {
+        const char *url = cJSON_GetStringValue(cJSON_GetObjectItem(item, "url"));
+        const char *dest = cJSON_GetStringValue(cJSON_GetObjectItem(item, "dest"));
+        if (!url || !dest) {
+            failed++;
+            continue;
+        }
+        if (cb) {
+            cb(FETCH_CONNECTING, (int)(((int64_t)done_count * 100) / total), dest);
+        }
+        if (!fetch_one(url, dest)) {
+            failed++;
+        }
+        done_count++;
+        if (cb) {
+            cb(FETCH_DOWNLOADING, (int)(((int64_t)done_count * 100) / total), dest);
+        }
+    }
+    return failed == 0;
 }
 
 static void fetch_task(void *arg)
@@ -223,33 +256,13 @@ static void fetch_task(void *arg)
 
     {
         const int total = cJSON_GetArraySize(items);
-        int done_count = 0;
-        int failed = 0;
-        const cJSON *item;
-        cJSON_ArrayForEach(item, items) {
-            const char *url = cJSON_GetStringValue(cJSON_GetObjectItem(item, "url"));
-            const char *dest = cJSON_GetStringValue(cJSON_GetObjectItem(item, "dest"));
-            if (!url || !dest) {
-                failed++;
-                continue;
-            }
-            if (cb) {
-                cb(FETCH_CONNECTING, (int)(((int64_t)done_count * 100) / total), dest);
-            }
-            if (!fetch_one(url, dest)) {
-                failed++;
-            }
-            done_count++;
-            if (cb) {
-                cb(FETCH_DOWNLOADING, (int)(((int64_t)done_count * 100) / total), dest);
-            }
-        }
+        const bool ok = fetch_items(items, cb);
         cJSON_Delete(root);
 
         if (cb) {
-            if (failed > 0) {
+            if (!ok) {
                 char detail[32];
-                snprintf(detail, sizeof(detail), "%d/%d failed", failed, total);
+                snprintf(detail, sizeof(detail), "some of %d failed", total);
                 cb(FETCH_ERROR, 100, detail);
             } else {
                 cb(FETCH_DONE, 100, NULL);

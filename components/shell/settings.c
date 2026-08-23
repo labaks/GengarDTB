@@ -5,6 +5,7 @@
 
 #include "app_registry.h"
 #include "bsp.h"
+#include "catalog.h"
 #include "cJSON.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -58,6 +59,7 @@ typedef enum {
     VIEW_TZ,       /* nested under Network, ROADMAP #36 */
     VIEW_STORAGE,
     VIEW_APPS,
+    VIEW_CATALOG,   /* nested under Apps, ROADMAP #20 */
 } settings_view_t;
 
 static lv_obj_t   *s_prev_screen;
@@ -82,6 +84,8 @@ static lv_obj_t   *s_ota_btn;             /* About */
 static lv_obj_t   *s_ota_status_label;    /* About */
 static lv_obj_t   *s_ota_confirm_btn;     /* About */
 static lv_obj_t   *s_fetch_status_label;  /* Apps */
+static lv_obj_t   *s_catalog_status_label;   /* Catalog */
+static lv_obj_t   *s_catalog_install_label;  /* Catalog */
 static lv_obj_t   *s_ram_arc;             /* Storage */
 static lv_obj_t   *s_ram_pct_label;       /* Storage */
 
@@ -735,9 +739,129 @@ static void fetch_clicked(lv_event_t *e)
     fetch_run(fetch_status_cb);
 }
 
-/* ------------------------------------------------------------------ views */
+/* -------------------------------------------------------------------- Catalog */
 
 static void show_view(settings_view_t view);
+
+/* ROADMAP #20. Runs on catalog.c's own task, except the CHECKING report,
+ * which catalog_check() fires synchronously on the caller's own task (the
+ * click handler below, on the LVGL task) before the button has even
+ * finished its own click handling — same convention as every other
+ * progress callback in this file needing the lock only for the async
+ * reports. */
+static void catalog_check_status_cb(catalog_check_state_t state, const char *detail)
+{
+    char buf[64];
+    switch (state) {
+    case CATALOG_CHECKING:
+        snprintf(buf, sizeof(buf), "Checking catalog...");
+        break;
+    case CATALOG_ERROR:
+        snprintf(buf, sizeof(buf), "Catalog check failed: %s", detail ? detail : "?");
+        break;
+    default:
+        buf[0] = '\0';
+        break;
+    }
+
+    if (lvgl_port_lock(200)) {
+        /* s_screen guards against Settings having been closed entirely
+         * while the check was in flight — s_list would then be a deleted
+         * pointer, and show_view()/list_text() touch it unconditionally.
+         * ota_status_cb/fetch_status_cb never hit this because they only
+         * ever update a label (already individually null-checked), never
+         * rebuild the screen the way a catalog result needs to. */
+        if (state == CATALOG_DONE && s_screen) {
+            /* The list view itself is the result — nothing left to say on
+             * the Apps screen this was clicked from. */
+            show_view(VIEW_CATALOG);
+        } else if (state != CATALOG_DONE && s_catalog_status_label) {
+            lv_label_set_text(s_catalog_status_label, buf);
+        }
+        lvgl_port_unlock();
+    }
+}
+
+static void catalog_check_clicked(lv_event_t *e)
+{
+    (void)e;
+    catalog_check(catalog_check_status_cb);
+}
+
+/* Same shape as fetch_status_cb/ota_status_cb above — runs on catalog.c's
+ * own install task, must take the lock, guards against the label already
+ * being gone (view switched away mid-install). */
+static void catalog_install_status_cb(fetch_state_t state, int percent, const char *detail)
+{
+    char buf[64];
+    switch (state) {
+    case FETCH_CONNECTING:
+        snprintf(buf, sizeof(buf), "Installing...");
+        break;
+    case FETCH_DOWNLOADING:
+        snprintf(buf, sizeof(buf), "Installing... %d%%", percent);
+        break;
+    case FETCH_DONE:
+        snprintf(buf, sizeof(buf), "Installed");
+        break;
+    case FETCH_ERROR:
+        snprintf(buf, sizeof(buf), "Install failed: %s", detail ? detail : "?");
+        break;
+    default:
+        buf[0] = '\0';
+        break;
+    }
+
+    if (lvgl_port_lock(200)) {
+        if (s_catalog_install_label) {
+            lv_label_set_text(s_catalog_install_label, buf);
+        }
+        /* A newly installed (or updated) app only shows up once the
+         * registry rescans and Full list rebuilds its tiles — same
+         * reasoning as fetch_status_cb's own rebuild-on-finish. Rebuilding
+         * the whole view too flips this row from "Install" to "Installed"
+         * without a manual Back/forward. s_screen guards against Settings
+         * having been closed entirely while the install ran — see
+         * catalog_check_status_cb's own comment on the same hazard. */
+        if ((state == FETCH_DONE || state == FETCH_ERROR) && s_screen) {
+            app_registry_scan();
+            shell_refresh_app_list();
+            show_view(VIEW_CATALOG);
+        }
+        lvgl_port_unlock();
+    }
+}
+
+static void catalog_install_clicked(lv_event_t *e)
+{
+    const size_t idx = (size_t)(intptr_t)lv_event_get_user_data(e);
+    if (catalog_install_is_running() || fetch_is_running()) {
+        return;
+    }
+    catalog_install(idx, catalog_install_status_cb);
+    lv_obj_add_state(lv_event_get_target(e), LV_STATE_DISABLED);
+}
+
+/* NULL if no installed app has this id — a fresh catalog entry, not yet on
+ * the device. Registry has no by-id lookup of its own (nothing else has
+ * ever needed one); a linear scan over at most APP_REGISTRY_MAX entries is
+ * cheap enough not to earn one just for this. */
+static const app_info_t *find_installed(const char *id)
+{
+    const size_t n = app_registry_count();
+    for (size_t i = 0; i < n; i++) {
+        const app_info_t *app = app_registry_get(i);
+        if (strcmp(app->id, id) == 0) {
+            return app;
+        }
+    }
+    return NULL;
+}
+
+/* build_catalog() itself lives further down, after list_text()/add_back_row()
+ * are defined — it is an Apps sub-view, placed right after build_apps(). */
+
+/* ------------------------------------------------------------------ views */
 
 /* Also used directly by category_clicked below — "Back" is just a jump to a
  * fixed target view, the same thing a Full list category row does with its
@@ -816,21 +940,23 @@ static lv_obj_t *list_text(const char *txt)
 {
     lv_obj_t *label = lv_list_add_text(s_list, txt);
     lv_obj_set_style_bg_opa(label, LV_OPA_TRANSP, LV_PART_MAIN);
-    /* This device's only way to scroll IS moving keyboard focus — there is
-     * no separate scroll gesture on a 2-button board. Two things are needed
-     * for that, not just one: membership in s_group (so PREV/NEXT can land
-     * here at all) AND LV_OBJ_FLAG_SCROLL_ON_FOCUS (so landing here actually
-     * scrolls it into view — lv_obj.c only calls lv_obj_scroll_to_view_
-     * recursive() on LV_EVENT_FOCUSED when this flag is set; it is NOT
-     * something group membership grants for free). lv_button/lv_switch/
-     * lv_slider all set this themselves in their own constructors, which is
-     * exactly why every other row on every other view already scrolled
-     * correctly without anyone noticing this was two separate mechanisms —
-     * a plain lv_obj/lv_label/lv_bar/lv_arc sets neither on its own.
-     * Harmless for a row with no click handler: ENTER on it just does
-     * nothing, same as landing on any other inert row would. */
-    lv_group_add_obj(s_group, label);
-    lv_obj_add_flag(label, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+    /* NOT in s_group (ROADMAP #20 follow-up, found live on hardware): this
+     * used to join the group on the theory that a 2-button board's only way
+     * to scroll a line into view is landing keyboard focus on it directly
+     * (see git history for the fuller version of that reasoning). In
+     * practice every list_text() in this file sits right next to a real,
+     * focusable control (a button/switch/bar immediately above or below it
+     * in the same short list), which already scrolls it into view as a
+     * side effect — the list's rows are short enough that several are
+     * visible around whichever one is focused. Once Apps grew a second
+     * status placeholder (Catalog, on top of Fetch's own), stacking that
+     * theoretical mechanism up became a real, reported annoyance: reaching
+     * Showcase or a pinned-app toggle from Fetch took two PREV/NEXT presses
+     * per row that had nothing to select, not one — a blank status label is
+     * indistinguishable from nothing happening at all when you land on it.
+     * If a future screen ever adds a list_text() with no focusable neighbor
+     * on either side, it will need its own explicit group membership; none
+     * does today. */
     return label;
 }
 
@@ -1373,6 +1499,14 @@ static void build_apps(void)
     lv_group_add_obj(s_group, fetch_btn);
     s_fetch_status_label = list_text("");
 
+    /* ROADMAP #20. Fetches /sd/catalog.json (see catalog.h) and, once it
+     * resolves, jumps straight to the list view (VIEW_CATALOG) — nothing
+     * useful to linger on here while it succeeds, only while it fails. */
+    lv_obj_t *catalog_btn = lv_list_add_button(s_list, LV_SYMBOL_LIST, "Browse catalog");
+    lv_obj_add_event_cb(catalog_btn, catalog_check_clicked, LV_EVENT_CLICKED, NULL);
+    lv_group_add_obj(s_group, catalog_btn);
+    s_catalog_status_label = list_text("");
+
     /* A manifest.json that failed to load (ROADMAP #18) — a directory with
      * no manifest.json at all is not reported here, see app_registry.h. */
     const size_t err_n = app_registry_error_count();
@@ -1454,6 +1588,52 @@ static void build_apps(void)
     }
 }
 
+/* ROADMAP #20 — nested under Apps, listing whatever catalog_check() (see
+ * catalog_check_clicked() above) most recently fetched. */
+static void build_catalog(void)
+{
+    add_back_row(VIEW_APPS);
+
+    s_catalog_install_label = list_text("");
+
+    const size_t n = catalog_count();
+    if (n == 0) {
+        list_text("Catalog is empty (or /sd/catalog.json is missing).");
+        return;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        const catalog_app_t *entry = catalog_get(i);
+        if (!entry) {
+            continue;
+        }
+
+        lv_obj_t *row = lv_list_add_button(s_list, NULL, NULL);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
+
+        lv_obj_t *name_lbl = lv_label_create(row);
+        lv_obj_set_flex_grow(name_lbl, 1);
+        char line[64];
+        snprintf(line, sizeof(line), "%s (v%s)", entry->name, entry->version);
+        lv_label_set_text(name_lbl, line);
+
+        const app_info_t *installed = find_installed(entry->id);
+        lv_obj_t *action_btn = lv_button_create(row);
+        lv_obj_t *action_lbl = lv_label_create(action_btn);
+        if (installed && strcmp(installed->version, entry->version) == 0) {
+            /* Not added to s_group: a disabled control with nothing to do
+             * on click has no business being a focus stop for B1/B2 either. */
+            lv_obj_add_state(action_btn, LV_STATE_DISABLED);
+            lv_label_set_text(action_lbl, "Installed");
+        } else {
+            lv_label_set_text(action_lbl, installed ? "Update" : "Install");
+            lv_obj_add_event_cb(action_btn, catalog_install_clicked, LV_EVENT_CLICKED,
+                                 (void *)(intptr_t)i);
+            lv_group_add_obj(s_group, action_btn);
+        }
+    }
+}
+
 static void show_view(settings_view_t view)
 {
     lv_obj_clean(s_list);
@@ -1466,6 +1646,8 @@ static void show_view(settings_view_t view)
     s_ota_confirm_btn = NULL;
     s_ota_status_label = NULL;
     s_fetch_status_label = NULL;
+    s_catalog_status_label = NULL;
+    s_catalog_install_label = NULL;
     s_ram_arc = NULL;
     s_ram_pct_label = NULL;
 
@@ -1476,6 +1658,7 @@ static void show_view(settings_view_t view)
     case VIEW_TZ:      build_tz();      break;
     case VIEW_STORAGE: build_storage(); break;
     case VIEW_APPS:    build_apps();    break;
+    case VIEW_CATALOG: build_catalog(); break;
     case VIEW_MENU:
     default:           build_menu();    break;
     }

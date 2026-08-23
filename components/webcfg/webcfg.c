@@ -19,6 +19,7 @@ static const char *TAG = "webcfg";
 #define OTA_PATH    BSP_SD_MOUNT_POINT "/ota.json"
 #define FETCH_PATH  BSP_SD_MOUNT_POINT "/fetch.json"
 #define WEATHER_PATH BSP_SD_MOUNT_POINT "/weather.json"
+#define CATALOG_PATH BSP_SD_MOUNT_POINT "/catalog.json"
 
 static httpd_handle_t s_httpd;
 
@@ -178,10 +179,11 @@ static void html_escape(char *dst, size_t dst_size, const char *src)
  * on a stack it does not own the budget of. */
 typedef struct {
     char device_name[64], wifi_ssid[33], ota_url[192], ota_manifest[192], fetch_manifest[192];
-    char weather_name[64], weather_lat[16], weather_lon[16];
+    char weather_name[64], weather_lat[16], weather_lon[16], catalog_url[192];
     char safe_name[3 * 64], safe_ssid[3 * 33], safe_ota_url[3 * 192],
          safe_ota_manifest[3 * 192], safe_fetch_manifest[3 * 192];
     char safe_weather_name[3 * 64], safe_weather_lat[3 * 16], safe_weather_lon[3 * 16];
+    char safe_catalog_url[3 * 192];
 } form_values_t;
 
 static esp_err_t get_handler(httpd_req_t *req)
@@ -195,7 +197,10 @@ static esp_err_t get_handler(httpd_req_t *req)
      * there is no way to see the current value through this UI at all,
      * by design. */
     form_values_t *v = calloc(1, sizeof(form_values_t));
-    char *page = malloc(4608);   /* bumped from 4096 for the Weather fieldset */
+    char *page = malloc(5632);   /* bumped from 4608 for the App catalog fieldset — gcc's
+                                   * format-truncation check does the arithmetic on the
+                                   * worst case (every field maxed out, HTML-escaped to 3x)
+                                   * and 4864 was already close enough to trip it */
     if (!v || !page) {
         free(v);
         free(page);
@@ -210,6 +215,7 @@ static esp_err_t get_handler(httpd_req_t *req)
     read_string_field(WEATHER_PATH, "name", v->weather_name, sizeof(v->weather_name));
     read_string_field(WEATHER_PATH, "lat", v->weather_lat, sizeof(v->weather_lat));
     read_string_field(WEATHER_PATH, "lon", v->weather_lon, sizeof(v->weather_lon));
+    read_string_field(CATALOG_PATH, "catalog_url", v->catalog_url, sizeof(v->catalog_url));
 
     html_escape(v->safe_name, sizeof(v->safe_name), v->device_name);
     html_escape(v->safe_ssid, sizeof(v->safe_ssid), v->wifi_ssid);
@@ -219,8 +225,9 @@ static esp_err_t get_handler(httpd_req_t *req)
     html_escape(v->safe_weather_name, sizeof(v->safe_weather_name), v->weather_name);
     html_escape(v->safe_weather_lat, sizeof(v->safe_weather_lat), v->weather_lat);
     html_escape(v->safe_weather_lon, sizeof(v->safe_weather_lon), v->weather_lon);
+    html_escape(v->safe_catalog_url, sizeof(v->safe_catalog_url), v->catalog_url);
 
-    snprintf(page, 4608,
+    snprintf(page, 5632,
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>deskos config</title>"
@@ -263,10 +270,15 @@ static esp_err_t get_handler(httpd_req_t *req)
         "<p class=\"hint\">Look coordinates up on openstreetmap.org (right-click a "
         "spot, \"Show address\") or latlong.net.</p>"
         "</fieldset>"
+        "<fieldset><legend>App catalog</legend>"
+        "<label>Catalog URL"
+        "<input name=\"catalog_url\" maxlength=\"191\" value=\"%s\"></label>"
+        "<p class=\"hint\">Settings &rarr; Apps &rarr; Browse catalog fetches this.</p>"
+        "</fieldset>"
         "<button type=\"submit\">Save</button>"
         "</form></body></html>",
         v->safe_name, v->safe_ssid, v->safe_ota_url, v->safe_ota_manifest, v->safe_fetch_manifest,
-        v->safe_weather_name, v->safe_weather_lat, v->safe_weather_lon);
+        v->safe_weather_name, v->safe_weather_lat, v->safe_weather_lon, v->safe_catalog_url);
 
     httpd_resp_set_type(req, "text/html");
     const esp_err_t err = httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
@@ -360,6 +372,7 @@ static esp_err_t post_handler(httpd_req_t *req)
     FIELD("weather_name",       WEATHER_PATH, "name");
     FIELD("weather_lat",        WEATHER_PATH, "lat");
     FIELD("weather_lon",        WEATHER_PATH, "lon");
+    FIELD("catalog_url",        CATALOG_PATH, "catalog_url");
 
     #undef FIELD
 
