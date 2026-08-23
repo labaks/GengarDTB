@@ -506,12 +506,6 @@ void app_main(void)
 
     app_registry_scan();
 
-    /* TEMP diagnostic for the api.open-meteo.com TLS failure (open question in
-     * CLAUDE.md) — prints which bundled root esp_crt_bundle matched and why
-     * mbedtls_pk_verify_ext rejected it. Needs CONFIG_LOG_MAXIMUM_LEVEL_DEBUG
-     * in sdkconfig to actually compile the message in. Remove once diagnosed. */
-    esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_DEBUG);
-
     /* Brought up before the shell so the launcher's status line is right from
      * the first frame. Returns OK with no credentials — that is a state to
      * display, not a boot failure. */

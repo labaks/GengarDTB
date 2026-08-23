@@ -229,6 +229,19 @@ static void filter_dict(dvalue_t *v, const char *arg, const cJSON *dicts)
      * shows something instead of vanishing behind a "--". */
 }
 
+/* Sakamoto's algorithm: day of week (0 = Sunday) for a Gregorian date, with
+ * no libc/timezone dependency at all — unlike mktime(), which would need a
+ * correct TZ/DST context just to fill in tm_wday and is exactly the kind of
+ * thing this pure, host-testable file goes out of its way to avoid. */
+static int day_of_week(int y, int mo, int d)
+{
+    static const int t[] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+    if (mo < 3) {
+        y -= 1;
+    }
+    return (y + y / 4 - y / 100 + y / 400 + t[mo - 1] + d) % 7;
+}
+
 static void filter_date(dvalue_t *v, const char *arg)
 {
     if (v->kind != DV_STRING || !arg || !*arg) {
@@ -249,6 +262,7 @@ static void filter_date(dvalue_t *v, const char *arg)
     tm.tm_mday = d;
     tm.tm_hour = h;
     tm.tm_min  = mi;
+    tm.tm_wday = day_of_week(y, mo, d);   /* strftime's %a/%A read this directly */
 
     char buf[32];
     if (strftime(buf, sizeof(buf), arg, &tm) == 0) {

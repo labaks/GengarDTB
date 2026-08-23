@@ -126,6 +126,16 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
 # fitting and not. Dynamic buffers free it right after the cert chain is
 # parsed, before the expensive bignum op runs.
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+# Belt-and-suspenders on top of DYNAMIC_BUFFER above: also frees the peer's CA
+# cert data once the handshake has used it. Only matters for a client that
+# never reuses one mbedtls_ssl_config across connections — ours creates a
+# fresh esp_http_client (and so a fresh TLS context) per fetch, so there is no
+# "re-register the cert" cost to pay back. #40's much bigger weather ui.jsonl
+# (42+ LVGL objects, held for the widget's whole session) re-tightened the
+# heap enough to make the open-meteo TLS verify fail again intermittently —
+# every extra KB reclaimed here is a KB that fetch doesn't fail on.
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
 # Static ECDH ciphersuites (as opposed to ECDHE) are a relic no server we talk
 # to negotiates in practice — every real TLS deployment uses ECDHE for
 # forward secrecy. ECDHE_RSA/ECDHE_ECDSA (kept) already cover the real world.

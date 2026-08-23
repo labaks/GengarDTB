@@ -1,6 +1,7 @@
 #include "widget.h"
 
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,8 +19,15 @@
 
 static const char *TAG = "widget";
 
-#define WIDGET_MAX_OBJS   24
-#define WIDGET_MAX_UI     8192      /* a layer-A layout is a handful of lines */
+#define WIDGET_MAX_OBJS   56      /* bumped for #40's per-cell weather grid
+                                     * (title+icon+value per hour/day, 7 of
+                                     * each); still cheap — wobj_t and its
+                                     * line-points twin are small static
+                                     * arrays. */
+#define WIDGET_MAX_UI     10240     /* was 8192; #40's per-cell weather grid
+                                       (49 lines) needs the extra room. Heap,
+                                       freed at the end of widget_open() —
+                                       transient, not held for the session. */
 #define WIDGET_TEXT_MAX   128
 #define REFRESH_MIN_S     30        /* floor, so a typo cannot hammer an API   */
 
@@ -46,6 +54,14 @@ typedef struct {
                             * own directory. Unused by RECT/LINE. */
     char         *cond;   /* NULL when always visible. A bare path (no
                             * {{...}}, no filters); see datasource_truthy. */
+    int           page;   /* -1: shown on every page (the default — existing
+                            * ui.jsonl files declare no "page" at all and stay
+                            * unaffected). >=0: shown only while that page is
+                            * the active one, see s_page/s_max_page below. */
+    char         *tap;    /* NULL when not tappable. An action name, same
+                            * small fixed set dispatch_tap_action() knows —
+                            * an unrecognised one is a silent no-op, same
+                            * policy as an unknown filter name. */
 } wobj_t;
 
 static const app_info_t *s_app;
@@ -54,6 +70,15 @@ static lv_obj_t         *s_prev_screen;
 static lv_obj_t         *s_status_label;
 static wobj_t            s_objs[WIDGET_MAX_OBJS];
 static size_t            s_nobjs;
+
+/* Multi-page layout: views tagged with an explicit "page" only show while
+ * s_page matches; untagged views (page == -1) show on every page, the usual
+ * case for shared chrome like a header. s_max_page tracks the highest page
+ * number any view declared, so "next_page" has something to wrap around at
+ * — a widget that never uses "page" keeps s_max_page at 0 and next_page is
+ * then a permanent no-op, not a crash or an out-of-range page. */
+static int               s_page;
+static int               s_max_page;
 
 /* Named lookup tables for the "dict" filter, e.g. {"dict":"weather_code",
  * "map":{"0":"Clear",...}}. One object: {name: map, name: map, ...}. */
@@ -70,7 +95,11 @@ static lv_point_precise_t s_line_pts[WIDGET_MAX_OBJS][2];
  * same widget at different poll periods without colliding. */
 typedef struct {
     char     name[24];
-    char     url[256];
+    char     url[384];   /* #40's hourly+daily weather URL runs ~290 chars
+                           * post-templating; 256 silently truncated it into
+                           * a malformed query string (server-side HTTP 400,
+                           * not a truncation error on our own end — nothing
+                           * here checks datasource_render()'s output length) */
     uint32_t every_s;
     uint32_t elapsed_s;
 } wsource_t;
@@ -188,6 +217,10 @@ static void image_apply(lv_obj_t *obj, const char *filename)
     lv_image_set_src(obj, path);
 }
 
+/* Defined later, alongside dispatch_tap_action() it calls into; add_view()
+ * below needs it as an LVGL event callback before that point in the file. */
+static void view_tap_cb(lv_event_t *e);
+
 static void add_view(const cJSON *line, int line_no)
 {
     if (s_nobjs >= WIDGET_MAX_OBJS) {
@@ -220,6 +253,15 @@ static void add_view(const cJSON *line, int line_no)
             lv_label_set_long_mode(obj, LV_LABEL_LONG_WRAP);
         }
 
+        /* Opt-in and additive: absent "align" keeps every existing widget's
+         * left-aligned text exactly as it was. Only meaningful together with
+         * "w" — centering text within a box the label doesn't have (no
+         * explicit width) is a no-op, LVGL just hugs the text either way. */
+        const char *align = cJSON_GetStringValue(cJSON_GetObjectItem(line, "align"));
+        if (align && strcmp(align, "center") == 0) {
+            lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        }
+
         lv_obj_set_style_text_font(obj,
             font_for((int)cJSON_GetNumberValue(cJSON_GetObjectItem(line, "font"))),
             LV_PART_MAIN);
@@ -250,6 +292,18 @@ static void add_view(const cJSON *line, int line_no)
             LV_PART_MAIN);
         lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN);
         lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+
+        const cJSON *radius = cJSON_GetObjectItem(line, "radius");
+        if (cJSON_IsNumber(radius)) {
+            lv_obj_set_style_radius(obj, (int)cJSON_GetNumberValue(radius), LV_PART_MAIN);
+        }
+        const cJSON *border_w = cJSON_GetObjectItem(line, "border_width");
+        if (cJSON_IsNumber(border_w)) {
+            lv_obj_set_style_border_width(obj, (int)cJSON_GetNumberValue(border_w), LV_PART_MAIN);
+            lv_obj_set_style_border_color(obj,
+                lv_color_hex(colour_for(cJSON_GetObjectItem(line, "border_color"), 0x445566)),
+                LV_PART_MAIN);
+        }
     } else if (strcmp(kind, "line") == 0) {
         /* A static divider, not a data-bound view: LVGL draws it from
          * (x1,y1)-(x2,y2), offset by the object's own (x,y). */
@@ -286,8 +340,10 @@ static void add_view(const cJSON *line, int line_no)
             lv_arc_set_range(obj, range_min, range_max);
             lv_arc_set_mode(obj, LV_ARC_MODE_NORMAL);
             /* This is a passive display, not a control: nothing on the
-             * widget screen should be draggable under the resistive touch. */
-            lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+             * widget screen should be draggable under the resistive touch.
+             * (The common tail below removes LV_OBJ_FLAG_CLICKABLE from
+             * every view anyway, but an arc's clickability also gates
+             * whether it is drag-adjustable, so spell it out here too.) */
             lv_obj_set_style_arc_color(obj,
                 lv_color_hex(colour_for(cJSON_GetObjectItem(line, "color"), 0x4A9EFF)),
                 LV_PART_INDICATOR);
@@ -325,6 +381,15 @@ static void add_view(const cJSON *line, int line_no)
 
     lv_obj_set_pos(obj, x, y);
 
+    /* LVGL objects default to clickable, arc's own creation branch above
+     * already had to opt back out of that for the same reason: whichever
+     * object is on top at a touch point eats the click outright, it is not
+     * "clickable with no listener, so fall through to what's underneath".
+     * A decorative rect or a label sitting inside a tappable region (see
+     * "tap" below) would silently swallow taps meant for it depending on
+     * exactly where the finger lands. Only "tap" opts an object back in. */
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+
     const char *cond = cJSON_GetStringValue(cJSON_GetObjectItem(line, "if"));
     if (cond) {
         s_objs[s_nobjs].cond = strdup(cond);
@@ -332,6 +397,25 @@ static void add_view(const cJSON *line, int line_no)
          * view starts hidden and is corrected on the first refresh, same as
          * a data-bound label starts as "--" until then. */
         lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    const cJSON *page_node = cJSON_GetObjectItem(line, "page");
+    s_objs[s_nobjs].page = cJSON_IsNumber(page_node) ? (int)cJSON_GetNumberValue(page_node) : -1;
+    if (s_objs[s_nobjs].page > s_max_page) {
+        s_max_page = s_objs[s_nobjs].page;
+    }
+    /* Page membership is static (known right now, not data-dependent like
+     * "if"), so decide visibility immediately rather than waiting for a
+     * refresh that may never come (a page with no data source at all). */
+    if (s_objs[s_nobjs].page >= 0 && s_objs[s_nobjs].page != s_page) {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    const char *tap = cJSON_GetStringValue(cJSON_GetObjectItem(line, "tap"));
+    if (tap) {
+        s_objs[s_nobjs].tap = strdup(tap);
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(obj, view_tap_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)s_nobjs);
     }
 
     s_objs[s_nobjs].obj = obj;
@@ -471,13 +555,38 @@ static void apply_data(const cJSON *root)
             }
         }
 
-        if (s_objs[i].cond) {
-            if (datasource_truthy(datasource_resolve(root, s_objs[i].cond))) {
+        if (s_objs[i].cond || s_objs[i].page >= 0) {
+            const bool page_ok = s_objs[i].page < 0 || s_objs[i].page == s_page;
+            const bool cond_ok = !s_objs[i].cond ||
+                                  datasource_truthy(datasource_resolve(root, s_objs[i].cond));
+            if (page_ok && cond_ok) {
                 lv_obj_remove_flag(s_objs[i].obj, LV_OBJ_FLAG_HIDDEN);
             } else {
                 lv_obj_add_flag(s_objs[i].obj, LV_OBJ_FLAG_HIDDEN);
             }
         }
+    }
+}
+
+/* The one thing a screen tap can currently ask for. Small and fixed on
+ * purpose, same reasoning as manifest "bindings" only knowing "refresh"
+ * (ROADMAP #16) — grow this list when a real widget needs another action,
+ * not speculatively. An unrecognised name is a silent no-op. */
+static void dispatch_tap_action(const char *action)
+{
+    if (strcmp(action, "next_page") == 0) {
+        if (s_max_page > 0) {
+            s_page = (s_page + 1) % (s_max_page + 1);
+            apply_data(s_combined);
+        }
+    }
+}
+
+static void view_tap_cb(lv_event_t *e)
+{
+    const size_t idx = (size_t)(uintptr_t)lv_event_get_user_data(e);
+    if (idx < s_nobjs && s_objs[idx].tap) {
+        dispatch_tap_action(s_objs[idx].tap);
     }
 }
 
@@ -861,6 +970,8 @@ esp_err_t widget_open(const app_info_t *app)
     s_cache_ts = 0;
     s_nhosttopics = 0;
     s_has_clock = false;
+    s_page = 0;
+    s_max_page = 0;
     memset(s_objs, 0, sizeof(s_objs));
     s_err_buf[0] = '\0';
     s_err_count = 0;
@@ -1018,8 +1129,10 @@ void widget_close(void)
     for (size_t i = 0; i < s_nobjs; i++) {
         free(s_objs[i].tmpl);
         free(s_objs[i].cond);
+        free(s_objs[i].tap);
         s_objs[i].tmpl = NULL;
         s_objs[i].cond = NULL;
+        s_objs[i].tap = NULL;
     }
     s_nobjs = 0;
 

@@ -244,6 +244,14 @@ static void test_filter_date(void)
     CHECK(strcmp(out, "not a date") == 0,
           "an unparsable date string must be a no-op, got '%s'", out);
 
+    /* 2026-08-19 is a Wednesday — tm_wday used to be left at its {0}
+     * initializer (Sunday) forever, so %a/%A silently lied for every date
+     * other than an actual Sunday. docs/app-format.md documented this as a
+     * known limitation; ROADMAP #40's weekly forecast needed it to actually
+     * work, so it got fixed instead of worked around. */
+    datasource_render("{{d | date:%a}}", root, NULL, out, sizeof(out));
+    CHECK(strcmp(out, "Wed") == 0, "2026-08-19 is a Wednesday, got '%s'", out);
+
     cJSON_Delete(root);
     cJSON_Delete(bad_root);
 }
